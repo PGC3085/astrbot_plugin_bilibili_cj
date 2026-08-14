@@ -1,0 +1,56 @@
+{
+    "credential": {
+        "sessdata": "",
+        "bili_jct": "",
+        "buvid3": "",
+        "buvid4": "",
+        "dedeuserid": "",
+        "ac_time_value": ""
+    },
+    "poll": {
+        "global_min_interval_sec": 60,
+        "poll_jitter_sec": 15,
+        "push_title_change": true
+    },
+    "webui": {
+        "enabled": true,
+        "host": "127.0.0.1",
+        "port": 8765,
+        "token": ""
+    },
+    "subscriptions": [
+        {
+            "type": "live",
+            "name": "示例直播订阅",
+            "uid": 835644,
+            "poll_interval_sec": 120,
+            "enabled": true,
+            "push_session_ids": [
+                "aiocqhttp:GroupMessage:123456789"
+            ]
+        },
+        {
+            "type": "dynamic",
+            "name": "示例动态订阅",
+            "uid": 2,
+            "poll_interval_sec": 180,
+            "enabled": true,
+            "push_session_ids": [
+                "aiocqhttp:GroupMessage:123456789",
+                "telegram:GroupMessage:12345"
+            ]
+        },
+        {
+            "type": "collection",
+            "name": "示例合集订阅",
+            "uid": 835644,
+            "list_id": 2294107,
+            "series_type": 0,
+            "poll_interval_sec": 300,
+            "enabled": true,
+            "push_session_ids": [
+                "aiocqhttp:GroupMessage:123456789"
+            ]
+        }
+    ]
+}

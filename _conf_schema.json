@@ -1,0 +1,107 @@
+{
+    "credential": {
+        "description": "B站凭据（Cookie）",
+        "type": "object",
+        "hint": "从浏览器获取的 Cookie 信息，用于通过B站API认证。获取方法见 README 中《凭据获取》一节",
+        "items": {
+            "sessdata": {
+                "description": "SESSDATA",
+                "type": "string",
+                "default": "",
+                "hint": "浏览器 Cookies 中的 SESSDATA 字段，URL 编码后的值（登录核心，必填）"
+            },
+            "bili_jct": {
+                "description": "bili_jct",
+                "type": "string",
+                "default": "",
+                "hint": "浏览器 Cookies 中的 bili_jct 字段（建议填写，缺失会告警）"
+            },
+            "buvid3": {
+                "description": "buvid3",
+                "type": "string",
+                "default": "",
+                "hint": "浏览器 Cookies 中的 buvid3 字段（可选，缺失不告警）"
+            },
+            "buvid4": {
+                "description": "buvid4",
+                "type": "string",
+                "default": "",
+                "hint": "浏览器 Cookies 中的 buvid4 字段（可选，缺失不告警）"
+            },
+            "dedeuserid": {
+                "description": "DedeUserID",
+                "type": "string",
+                "default": "",
+                "hint": "浏览器 Cookies 中的 DedeUserID 字段（即你的B站UID，建议填写，缺失会告警）"
+            },
+            "ac_time_value": {
+                "description": "ac_time_value",
+                "type": "string",
+                "default": "",
+                "hint": "localStorage 中的 ac_time_value，用于刷新 Cookie，可不填"
+            }
+        }
+    },
+    "poll": {
+        "description": "轮询设置",
+        "type": "object",
+        "hint": "全局轮询参数。两次轮询的实际间隔为 max(订阅轮询间隔, global_min_interval_sec) + [0, poll_jitter_sec) 的随机延迟",
+        "items": {
+            "global_min_interval_sec": {
+                "description": "全局最小轮询间隔（秒）",
+                "type": "int",
+                "default": 60,
+                "hint": "任何订阅的两次轮询间隔不会低于此值。最小为 1，低于 1 会被钳制为 1"
+            },
+            "poll_jitter_sec": {
+                "description": "随机波动上限（秒）",
+                "type": "float",
+                "default": 15,
+                "hint": "每次轮询额外增加 0~N 秒的随机延迟，避免被风控。不能为负，低于 0 会被钳制为 0"
+            },
+            "push_title_change": {
+                "description": "直播标题变更推送",
+                "type": "bool",
+                "default": true,
+                "hint": "直播中若检测到标题变化，是否推送「改标题」通知"
+            }
+        }
+    },
+    "webui": {
+        "description": "WebUI 设置",
+        "type": "object",
+        "hint": "插件自带的独立 WebUI 服务（独立端口，不依赖 AstrBot 仪表盘）。host/port/enabled 变更需重载插件后生效",
+        "items": {
+            "enabled": {
+                "description": "启用 WebUI",
+                "type": "bool",
+                "default": true,
+                "hint": "是否启动内置 WebUI 服务"
+            },
+            "host": {
+                "description": "监听地址",
+                "type": "string",
+                "default": "127.0.0.1",
+                "hint": "监听地址。仅本机访问填 127.0.0.1；局域网访问填 0.0.0.0"
+            },
+            "port": {
+                "description": "监听端口",
+                "type": "int",
+                "default": 8765,
+                "hint": "WebUI 监听端口，范围 1-65535"
+            },
+            "token": {
+                "description": "访问令牌",
+                "type": "string",
+                "default": "",
+                "hint": "WebUI 的 Bearer 访问令牌。留空时首次启动会自动生成并打印到日志"
+            }
+        }
+    },
+    "subscriptions": {
+        "description": "订阅列表",
+        "type": "list",
+        "default": [],
+        "hint": "JSON 数组格式，每个元素为一个订阅对象。元素字段（由插件在加载时校验，非法项会被跳过并记日志）：\n  type - 订阅类型，live（直播）/ dynamic（动态）/ collection（合集）\n  name - 订阅名称（用于日志/状态显示）\n  uid - B站用户UID（数字）\n  list_id - 合集ID（仅 collection，从合集URL获取）\n  series_type - 合集类型（仅 collection，0=视频合集，1=收藏夹）\n  poll_interval_sec - 该订阅的轮询间隔（秒，缺省 300）\n  enabled - 是否启用（true/false）\n  push_session_ids - 推送目标会话ID列表（字符串数组，通过 /sid 指令获取，如 \"aiocqhttp:GroupMessage:123456789\"）\n\n示例：\n[{\"type\": \"live\", \"name\": \"示例直播\", \"uid\": 835644, \"poll_interval_sec\": 120, \"enabled\": true, \"push_session_ids\": [\"aiocqhttp:GroupMessage:123456789\"]}]"
+    }
+}

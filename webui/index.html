@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<title>B站监控 · WebUI</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+
+<noscript><div class="noscript">此界面需要启用 JavaScript 才能使用。</div></noscript>
+
+<!-- ========== 令牌门（未提供 token 或 401 时显示） ========== -->
+<div id="token-gate" class="token-gate">
+  <div class="gate-card">
+    <div class="gate-brand">B站监控 <span>WebUI</span></div>
+    <h1 class="gate-title">需要访问令牌</h1>
+    <p class="gate-hint">
+      插件首次启动时会在插件日志中打印一次访问令牌（日志中搜索
+      <code>访问令牌</code>）。输入该令牌以进入管理界面。
+    </p>
+    <input id="token-input" class="input" type="text" placeholder="粘贴访问令牌"
+           autocomplete="off" spellcheck="false" autofocus>
+    <div id="token-msg" class="msg"></div>
+    <button id="token-save" class="btn btn-primary btn-block">进入</button>
+  </div>
+</div>
+
+<!-- ========== 应用外壳 ========== -->
+<div id="app" class="app hidden">
+
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">B站监控</span>
+      <span class="brand-sub">WebUI</span>
+    </div>
+    <nav id="tabs" class="tabs" role="tablist">
+      <button class="tab active" data-tab="subs" role="tab" aria-selected="true">订阅</button>
+      <button class="tab" data-tab="settings" role="tab" aria-selected="false">设置</button>
+      <button class="tab" data-tab="status" role="tab" aria-selected="false">状态</button>
+      <button class="tab" data-tab="logs" role="tab" aria-selected="false">日志</button>
+    </nav>
+    <div class="header-right">
+      <span id="conn-status" class="conn" title="后端 API 连接状态">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="conn-text">连接中…</span>
+      </span>
+      <button id="btn-change-token" class="btn btn-ghost btn-sm">更换令牌</button>
+    </div>
+  </header>
+
+  <main class="content">
+
+    <!-- ========== 订阅 ========== -->
+    <section id="tab-subs" class="tab-panel">
+      <div id="sub-errors" class="error-box hidden"></div>
+
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <button id="btn-add-sub" class="btn">+ 新增订阅</button>
+          <span class="hint">新增 / 编辑 / 删除 / 启停即时保存</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="table-wrap">
+          <table id="subs-table" class="subs-table">
+            <thead>
+              <tr>
+                <th class="col-enable">启用</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th>UID</th>
+                <th>间隔(s)</th>
+                <th>推送会话</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="subs-body"></tbody>
+          </table>
+        </div>
+        <div id="subs-empty" class="empty hidden">
+          还没有订阅。点击「+ 新增订阅」添加第一个，保存后立即生效。
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2 class="panel-title">测试推送</h2>
+        <div class="form-row">
+          <label class="field grow">
+            <span class="field-label">推送会话</span>
+            <input id="tp-session" class="input mono" type="text"
+                   placeholder="aiocqhttp:GroupMessage:123456789" spellcheck="false">
+          </label>
+          <label class="field" style="min-width: 128px">
+            <span class="field-label">事件类型</span>
+            <select id="tp-event-type" class="input">
+              <option value="live_on">开播</option>
+              <option value="live_off">下播</option>
+              <option value="live_title">改标题</option>
+              <option value="dynamic" selected>动态</option>
+              <option value="collection">合集</option>
+            </select>
+          </label>
+          <label class="field grow">
+            <span class="field-label">消息内容</span>
+            <input id="tp-message" class="input" type="text" value="这是一条测试推送">
+          </label>
+          <button id="tp-send" class="btn btn-primary align-end">发送</button>
+        </div>
+        <div id="tp-result" class="msg"></div>
+      </div>
+    </section>
+
+    <!-- ========== 设置 ========== -->
+    <section id="tab-settings" class="tab-panel hidden">
+      <div class="panel">
+        <h2 class="panel-title">B站凭据（Cookie）</h2>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">SESSDATA</span>
+            <input id="set-cred-sessdata" class="input mono" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">bili_jct</span>
+            <input id="set-cred-bili_jct" class="input mono" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">buvid3</span>
+            <input id="set-cred-buvid3" class="input mono" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">buvid4</span>
+            <input id="set-cred-buvid4" class="input mono" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">DedeUserID</span>
+            <input id="set-cred-dedeuserid" class="input mono" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">ac_time_value（可留空）</span>
+            <input id="set-cred-ac_time_value" class="input mono" type="text" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
+        <div class="hint">从浏览器 Cookies 获取，用于通过 B 站 API 认证。获取方法见 README 中《凭据获取》一节。</div>
+      </div>
+
+      <div class="panel">
+        <h2 class="panel-title">轮询设置</h2>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">全局最小轮询间隔（秒）</span>
+            <input id="set-poll-min" class="input" type="number" min="1" step="1">
+          </label>
+          <label class="field">
+            <span class="field-label">随机波动上限（秒）</span>
+            <input id="set-poll-jitter" class="input" type="number" min="0" step="any">
+          </label>
+        </div>
+        <label class="check">
+          <input id="set-poll-title" type="checkbox"> 直播标题变更时推送「改标题」通知
+        </label>
+        <div class="hint">两次轮询实际间隔 = max(订阅轮询间隔, 全局最小) + 0 ~ 波动上限 的随机延迟。</div>
+      </div>
+
+      <div class="panel">
+        <h2 class="panel-title">WebUI</h2>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">监听地址</span>
+            <input id="set-webui-host" class="input mono" type="text" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="field-label">监听端口</span>
+            <input id="set-webui-port" class="input" type="number" min="1" max="65535" step="1">
+          </label>
+        </div>
+        <label class="check">
+          <input id="set-webui-enabled" type="checkbox"> 启用 WebUI 服务
+        </label>
+        <label class="field">
+          <span class="field-label">访问令牌（只读，仅首次启动时在插件日志打印一次）</span>
+          <input id="set-webui-token" class="input mono" type="text" readonly spellcheck="false">
+        </label>
+        <div class="hint">host / port / enabled 的修改需要重载插件后生效，此处仅持久化。</div>
+      </div>
+
+      <div class="toolbar">
+        <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
+        <span id="settings-msg" class="msg"></span>
+      </div>
+      <div id="settings-errors" class="error-box hidden"></div>
+    </section>
+
+    <!-- ========== 状态 ========== -->
+    <section id="tab-status" class="tab-panel hidden">
+      <div class="toolbar">
+        <h2 class="panel-title">订阅状态</h2>
+        <span id="status-meta" class="msg"></span>
+      </div>
+      <div id="config-status" class="msg"></div>
+      <div id="status-grid" class="status-grid"></div>
+    </section>
+
+    <!-- ========== 日志 ========== -->
+    <section id="tab-logs" class="tab-panel hidden">
+      <div class="toolbar">
+        <h2 class="panel-title">运行日志</h2>
+        <span id="log-meta" class="msg"></span>
+        <button id="btn-log-refresh" class="btn btn-sm">刷新</button>
+      </div>
+      <pre id="log-box" class="log-box" aria-live="polite"></pre>
+    </section>
+
+  </main>
+</div>
+
+<!-- ========== 订阅编辑弹窗 ========== -->
+<div id="sub-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sub-modal-title">
+  <div class="modal-card">
+    <h2 id="sub-modal-title" class="modal-title">编辑订阅</h2>
+    <div id="sub-modal-errors" class="error-box hidden"></div>
+
+    <div id="f-id-line" class="f-id-line hidden">
+      ID：<code id="f-id"></code><span class="muted">（由后端分配，不可修改）</span>
+    </div>
+
+    <div class="form-grid">
+      <label class="field">
+        <span class="field-label">类型</span>
+        <select id="f-type" class="input">
+          <option value="live">live · 直播</option>
+          <option value="dynamic">dynamic · 动态</option>
+          <option value="collection">collection · 合集</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">名称（可留空，缺省为 type:uid）</span>
+        <input id="f-name" class="input" type="text" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">UID（数字）</span>
+        <input id="f-uid" class="input mono" type="text" inputmode="numeric" placeholder="B站用户UID" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">轮询间隔（秒）</span>
+        <input id="f-poll" class="input" type="number" min="1" step="1">
+      </label>
+      <label id="f-list-id-wrap" class="field hidden">
+        <span class="field-label">合集/列表 ID</span>
+        <input id="f-list-id" class="input mono" type="text" inputmode="numeric" spellcheck="false">
+      </label>
+      <label id="f-series-wrap" class="field hidden">
+        <span class="field-label">合集类型</span>
+        <select id="f-series" class="input">
+          <option value="0">0 · 视频合集</option>
+          <option value="1">1 · 收藏夹</option>
+        </select>
+      </label>
+    </div>
+
+    <label class="check">
+      <input id="f-enabled" type="checkbox"> 启用该订阅
+    </label>
+
+    <label class="field">
+      <span class="field-label">推送会话（每行一个，格式 platform:message_type:session_id）</span>
+      <textarea id="f-sessions" class="input" rows="4" spellcheck="false"
+                placeholder="aiocqhttp:GroupMessage:123456789"></textarea>
+    </label>
+
+    <div class="modal-actions">
+      <button id="f-cancel" class="btn">取消</button>
+      <button id="f-save" class="btn btn-primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status"></div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>
