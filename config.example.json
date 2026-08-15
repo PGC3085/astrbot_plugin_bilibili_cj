@@ -13,7 +13,8 @@
         "push_title_change": true,
         "push_live_cover": true,
         "push_dynamic_cover": true,
-        "push_collection_cover": true
+        "push_collection_cover": true,
+        "push_dynamic_live_share": false
     },
     "webui": {
         "enabled": true,

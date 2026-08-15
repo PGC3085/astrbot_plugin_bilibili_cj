@@ -208,6 +208,10 @@ class Scheduler:
         )
         self._logger = logger if logger is not None else _get_logger()
         self._now: Callable[[], float] = now if now is not None else time.monotonic
+        #: 轮询器使用的 epoch 时钟：``time.monotonic`` 无纪元语义，若误传给
+        #: 直播轮询器会把「下播时间/时长」算成 1970 年起的垃圾值（时长恒 0）。
+        #: 令牌桶继续用 ``_now``（monotonic 抗系统时钟跳变），二者解耦。
+        self._epoch_now: Callable[[], float] = now if now is not None else time.time
         self._sleep: Callable[[float], Awaitable[None]] = (
             sleep if sleep is not None else asyncio.sleep
         )
@@ -220,6 +224,7 @@ class Scheduler:
         self._push_live_cover = True
         self._push_dynamic_cover = True
         self._push_collection_cover = True
+        self._push_dynamic_live_share = False
         self._apply_poll_settings(poll_settings)
 
         self._bucket = self._new_bucket()
@@ -252,6 +257,9 @@ class Scheduler:
         self._push_live_cover = bool(settings.get("push_live_cover", True))
         self._push_dynamic_cover = bool(settings.get("push_dynamic_cover", True))
         self._push_collection_cover = bool(settings.get("push_collection_cover", True))
+        self._push_dynamic_live_share = bool(
+            settings.get("push_dynamic_live_share", False)
+        )
 
     def _new_bucket(self) -> TokenBucket:
         """按当前订阅重建令牌桶（容量 3、速率=聚合轮询需求，见 :meth:`_bucket_rate`）。"""
@@ -293,7 +301,7 @@ class Scheduler:
                     self._logger,
                     self.context,
                     self._push_title_change,
-                    now=self._now,
+                    now=self._epoch_now,
                     acquire=acquire,
                     push_cover=self._push_live_cover,
                 )
@@ -310,6 +318,7 @@ class Scheduler:
                     self._logger,
                     acquire=acquire,
                     push_cover=self._push_dynamic_cover,
+                    push_live_share=self._push_dynamic_live_share,
                 )
             elif sub.type == "collection":
                 poller = CollectionPoller(

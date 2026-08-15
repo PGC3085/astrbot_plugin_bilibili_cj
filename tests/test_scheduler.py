@@ -785,3 +785,23 @@ def test_poll_one_exception_does_not_kill_task() -> None:
         await scheduler.stop()
 
     asyncio.run(scenario())
+
+
+def test_live_poller_receives_epoch_clock() -> None:
+    """直播轮询器使用 epoch 时钟：monotonic 无纪元会把下播时间算成 1970 年。"""
+
+    scheduler = Scheduler(
+        subscriptions=[_live_sub("live-1", 10086, interval=60)],
+        credential_cfg={},
+        repo=object(),
+        db=None,
+        build_chain=build_chain,
+        send=send,
+        context=FakeContext(),
+        status={},
+        retry_counts={},
+    )
+    # 生产默认：epoch 时钟给出 2023+ 年的秒级时间戳（远大于 monotonic 开机时长）
+    assert scheduler._epoch_now() > 1_000_000_000
+    pollers = scheduler._build_pollers()
+    assert pollers["live-1"].now is scheduler._epoch_now

@@ -77,6 +77,12 @@
                 "default": true,
                 "hint": "动态推送是否附带封面图片。同上，平台图文兼容有问题时可关闭以仅推送文字"
             },
+            "push_dynamic_live_share": {
+                "description": "推送直播分享动态",
+                "type": "bool",
+                "default": false,
+                "hint": "是否推送「直播分享」类动态。B 站会在直播结束后自动生成该类动态（非 UP 主动发送），默认关闭以避免与开播/下播通知重复"
+            },
             "push_collection_cover": {
                 "description": "合集更新推送携带封面图片",
                 "type": "bool",

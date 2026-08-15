@@ -236,6 +236,9 @@ class DynamicPoller:
             per-poll 限速）；缺省为无操作，行为不变。
         push_cover: 是否在推送中携带封面图片（``poll.push_dynamic_cover``）；
             部分平台（如飞书）图文混合消息存在兼容问题时关闭以仅推送文字。
+        push_live_share: 是否推送「直播分享」类动态（``poll.push_dynamic_live_share``，
+            类型码 4308）。B 站会在直播结束后自动生成该类动态（非 UP 主动发送），
+            缺省不推送以避免与开播/下播通知重复。
     """
 
     def __init__(
@@ -253,6 +256,7 @@ class DynamicPoller:
         logger: logging.Logger | None = None,
         acquire: Callable[[], Awaitable[None]] | None = None,
         push_cover: bool = True,
+        push_live_share: bool = False,
     ) -> None:
         self.subscription = subscription
         self.repo = repo
@@ -267,6 +271,7 @@ class DynamicPoller:
         )
         self._logger = logger if logger is not None else _get_logger()
         self.push_cover = push_cover
+        self.push_live_share = push_live_share
         self.error_count = 0
 
     async def poll(self) -> None:
@@ -364,6 +369,10 @@ class DynamicPoller:
         if not dyn_id:
             return
         type_ = self._dynamic_type(item)
+        if type_ == 4308 and not self.push_live_share:
+            # 直播分享动态（B 站自动生成，非 UP 主动发送）：默认不推送，
+            # 也不写入去重记录（后续轮次保持可被配置重新启用时捕获）。
+            return
         retries = self.retry_counts.get(sub.id, {}).get(dyn_id, 0)
         newly = await self.db.insert_dynamic_if_new(sub.id, dyn_id, type_)
         if not newly and retries == 0:

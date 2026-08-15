@@ -120,6 +120,7 @@
 | `push_live_cover` | bool | true | 开播推送是否携带直播间封面（封面位于消息尾部） |
 | `push_dynamic_cover` | bool | true | 动态推送是否携带封面图片 |
 | `push_collection_cover` | bool | true | 合集更新推送是否携带视频封面 |
+| `push_dynamic_live_share` | bool | false | 是否推送「直播分享」动态。B 站在直播结束后会自动生成这类动态（非 UP 主动发送），默认关闭以避免与开播/下播通知重复 |
 
 > **每个订阅由独立任务按自身间隔轮询**：实际间隔 = `max(订阅轮询间隔, global_min_interval_sec) + random(0, poll_jitter_sec)` 秒，订阅之间互不影响（条目多不会拉长单个订阅的间隔）。全局令牌桶速率为各启用订阅的聚合需求，只吸收同时刻的突发，不会拖慢配置的轮询间隔。
 >

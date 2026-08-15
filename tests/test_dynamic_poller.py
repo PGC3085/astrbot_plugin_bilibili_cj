@@ -136,6 +136,7 @@ def _make_poller(
     logger: logging.Logger | None = None,
     subscription: Subscription | None = None,
     push_cover: bool = True,
+    push_live_share: bool = False,
 ) -> tuple[DynamicPoller, dict]:
     status: dict = {
         subscription.id if subscription else "sub-1": SimpleNamespace(
@@ -153,6 +154,7 @@ def _make_poller(
         retry_counts=retry_counts if retry_counts is not None else {},
         logger=logger,
         push_cover=push_cover,
+        push_live_share=push_live_share,
     )
     return poller, status
 
@@ -708,5 +710,54 @@ def test_dynamic_payload_cover_gated_by_setting(tmp_path) -> None:
         payload = poller_off._payload(poller_off.subscription, item, "100", 8)
         assert "cover" not in payload
         await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_live_share_dynamic_skipped_by_default(tmp_path) -> None:
+    """直播分享动态（B 站自动生成）默认不推送；配置开启后推送。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_page([])])
+        context = FakeContext()
+        poller, _ = _make_poller(
+            repo, db, context=context
+        )  # push_live_share 缺省 False
+        try:
+            await poller.poll()  # seed 空
+            repo.pages = [
+                _page([_polymer_item(100, "DYNAMIC_TYPE_LIVE_RCMD", desc="直播分享")])
+            ]
+            await poller.poll()
+            assert context.sent == []  # 默认不推送自动直播分享动态
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_live_share_dynamic_pushed_when_enabled(tmp_path) -> None:
+    """push_live_share=True 时直播分享动态正常推送。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_page([])])
+        context = FakeContext()
+        poller, _ = _make_poller(repo, db, context=context, push_live_share=True)
+        try:
+            await poller.poll()  # seed 空
+            repo.pages = [
+                _page([_polymer_item(100, "DYNAMIC_TYPE_LIVE_RCMD", desc="直播分享")])
+            ]
+            await poller.poll()
+            assert len(context.sent) == 1
+            text = str(context.sent[0][1])
+            assert "直播分享" in text
+            assert "https://t.bilibili.com/100" in text
+        finally:
+            await db.close()
 
     asyncio.run(scenario())
