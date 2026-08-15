@@ -3,9 +3,10 @@
 Consumed by the pollers (todo 6/7/8). Two public entry points:
 
 - :func:`build_chain` turns an event payload into the push content. When the
-  AstrBot runtime is available it returns a ``MessageChain`` (text plus an
-  optional cover image); when it is not (offline tests / T17 smoke) it returns
-  a plain ``str``. Callers pass the result straight to
+  AstrBot runtime is available it returns a ``MessageChain`` (text followed by
+  zero or more images from ``payload["images"]``, falling back to the single
+  ``payload["cover"]`` URL); when it is not (offline tests / T17 smoke) it
+  returns a plain ``str``. Callers pass the result straight to
   ``context.send_message(session, chain)`` without caring which type it is.
 - :func:`send` delivers a prebuilt chain to every ``push_session_ids`` target
   of a subscription, returning a per-session success map and recording
@@ -123,7 +124,8 @@ def text_for(event_type: str, payload: dict) -> str:
               动作短语（含尾部冒号，如 ``发布了新动态：``），``body`` 为
               正文 + 类型专属行（由 poller 按 DDBOT news.tmpl 逻辑组装）。
             - ``collection``: name, video_title, list_name, publish_time, url.
-            ``cover`` (URL, optional) is only consumed by :func:`build_chain`.
+            ``images`` (list of URLs, optional) and ``cover`` (single URL,
+            optional fallback) are only consumed by :func:`build_chain`.
 
     Returns:
         The rendered push text. 正文截断到 :data:`_MAX_TEXT_LEN` 字符；若载荷
@@ -158,8 +160,10 @@ def build_chain(event_type: str, payload: dict) -> Any:
 
     Args:
         event_type: Event type, forwarded to :func:`text_for`.
-        payload: Event payload, as documented in :func:`text_for`. ``cover``
-            is an optional image URL appended when the AstrBot API exists.
+        payload: Event payload, as documented in :func:`text_for`. ``images``
+            is an optional list of image URLs appended to the message chain;
+            ``cover`` (single URL) is accepted as the fallback for callers
+            that predate multi-image dynamic pushes.
 
     Returns:
         ``MessageChain`` when available, else ``str``. Callers pass this
@@ -169,17 +173,25 @@ def build_chain(event_type: str, payload: dict) -> Any:
     if not _ASTRBOT_AVAILABLE or MessageChain is None or Comp is None:
         return text
     chain = MessageChain().message(text)
-    cover = payload.get("cover")
-    if cover:
+    image_urls = payload.get("images")
+    if not isinstance(image_urls, (list, tuple)):
+        cover = payload.get("cover")
+        image_urls = (str(cover),) if cover else ()
+    for raw_url in image_urls:
+        if not raw_url:
+            continue
         try:
-            # 封面固定追加在消息链**尾部**（文字在前）：部分平台（如飞书）对
+            # 图片固定追加在消息链**尾部**（文字在前）：部分平台（如飞书）对
             # 「文字+图片」混合消息链存在顺序兼容问题，尾部顺序可最大限度
             # 保证文字与图片同时送达；仍不兼容时可经 poll.push_*_cover 关闭。
-            image = Comp.Image.fromURL(str(cover))
+            image = Comp.Image.fromURL(str(raw_url))
             chain.chain.append(image)
-        except Exception as exc:  # noqa: BLE001 - 封面失败必须降级而非中断推送
+        except Exception as exc:  # noqa: BLE001 - 图片失败必须降级而非中断推送
             _get_logger().warning(
-                "封面图片加载失败（event=%s），降级为纯文本推送: %s", event_type, exc
+                "图片加载失败（event=%s, url=%s），跳过该图片: %s",
+                event_type,
+                raw_url,
+                exc,
             )
     return chain
 

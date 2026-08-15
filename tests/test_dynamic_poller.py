@@ -670,6 +670,61 @@ def test_polymer_av_dynamic_pushed_end_to_end(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_real_opus_draw_dynamic_pushed_with_text_and_images(tmp_path) -> None:
+    """线上反馈根因回归：``DYNAMIC_TYPE_DRAW`` + ``MAJOR_TYPE_OPUS`` 的
+    图文动态必须带出 summary 正文与全部图片，而不是只有标题行和链接。"""
+
+    def _real_opus_item(dyn_id: int) -> dict:
+        return {
+            "id_str": str(dyn_id),
+            "type": "DYNAMIC_TYPE_DRAW",
+            "modules": {
+                "module_author": {"name": "枝堇Sumire", "pub_ts": "1786371736"},
+                "module_dynamic": {
+                    # 真实 feed/space 数据：图文动态的 desc 为 null。
+                    "desc": None,
+                    "major": {
+                        "type": "MAJOR_TYPE_OPUS",
+                        "opus": {
+                            "title": "【置顶】",
+                            "summary": {"text": "这是图文正文，含直播预告。"},
+                            "pics": [
+                                {"url": "https://example.com/1.jpg"},
+                                {"url": "https://example.com/2.jpg"},
+                            ],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_page([])])
+        context = FakeContext()
+        poller, _ = _make_poller(repo, db, context=context)
+        try:
+            await poller.poll()  # seed 空
+            item = _real_opus_item(900)
+            repo.pages = [_page([item])]
+            await poller.poll()
+            assert len(context.sent) == 1
+            text = str(context.sent[0][1])
+            assert "发表了新动态：" in text
+            assert "这是图文正文，含直播预告。" in text
+            assert "https://t.bilibili.com/900" in text
+            payload = poller._payload(poller.subscription, item, "900", 2048)
+            assert payload["images"] == [
+                "https://example.com/1.jpg",
+                "https://example.com/2.jpg",
+            ]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_v1_seeded_state_reseeded_silently_no_flood(tmp_path) -> None:
     """v1 解析缺陷留下的「seeded=1 但无去重记录」状态：升级后首轮静默重
     seed（记录当前可见内容、不推送），第二轮仅推送真正新增的动态——根治
