@@ -498,7 +498,8 @@ def test_full_chain_dynamic_flow(tmp_path) -> None:
             assert session == _SESSION
             assert isinstance(chain, str)
             assert "【B站动态】" in chain
-            assert "视频投稿" in chain
+            assert "投稿了视频" in chain
+            assert "新视频" in chain
             assert "新视频" in chain
             assert "https://t.bilibili.com/100" in chain
 

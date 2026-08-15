@@ -40,6 +40,7 @@ try:
     from .poller.collection import CollectionPoller
     from .poller.dynamic import DynamicPoller
     from .poller.live import LivePoller
+    from .push import format_event_time
     from .repository import BiliRepository, SdkRepository
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
     from config import Subscription, coerce_bool  # type: ignore[import-not-found]
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
     from poller.collection import CollectionPoller  # type: ignore[import-not-found]
     from poller.dynamic import DynamicPoller  # type: ignore[import-not-found]
     from poller.live import LivePoller  # type: ignore[import-not-found]
+    from push import format_event_time  # type: ignore[import-not-found]
     from repository import BiliRepository, SdkRepository  # type: ignore[import-not-found]
 
 #: 令牌桶容量（允许的瞬时并发轮询数，随后按速率匀速补充）。
@@ -566,11 +568,12 @@ class Scheduler:
         )
         payload: dict[str, Any] = {
             "name": sub.name,
-            "type_text": "自动禁用告警",
-            "content": (
+            "action": "自动禁用告警：",
+            "body": (
                 f"订阅连续轮询失败 {_MAX_CONSECUTIVE_ERRORS} 次，"
                 "已自动禁用该订阅（重启插件后恢复）。"
             ),
+            "event_time": format_event_time(self._epoch_now()),
         }
         if sub.uid is not None:
             payload["url"] = f"https://space.bilibili.com/{sub.uid}"

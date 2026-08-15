@@ -69,13 +69,15 @@ def test_dynamic_template_renders_event_time() -> None:
         "dynamic",
         {
             "name": "UP",
-            "type_text": "文字",
-            "content": "内容",
+            "action": "发布了新动态：",
+            "body": "内容",
             "event_time": "2023-11-14 22:13:20",
             "url": "https://t.bilibili.com/1",
         },
     )
     assert "【B站动态】" in text
+    assert "UP发布了新动态：" in text
+    assert "内容" in text
     assert "时间：2023-11-14 22:13:20" in text
 
 
@@ -101,8 +103,8 @@ def test_truncation_keeps_url_at_end() -> None:
         "dynamic",
         {
             "name": "UP",
-            "type_text": "文字",
-            "content": "很" * 1000,
+            "action": "发布了新动态：",
+            "body": "很" * 1000,
             "event_time": "2023-11-14 22:13:20",
             "url": "https://t.bilibili.com/1",
         },
@@ -138,8 +140,8 @@ def test_short_text_unaffected_by_url_reappend() -> None:
         "dynamic",
         {
             "name": "UP",
-            "type_text": "文字",
-            "content": "短内容",
+            "action": "发布了新动态：",
+            "body": "短内容",
             "event_time": "2023-11-14 22:13:20",
             "url": "https://t.bilibili.com/1",
         },

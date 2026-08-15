@@ -1144,11 +1144,12 @@ def test_test_payload_maps_message_per_event_type():
     assert live_on["title"] == "标题"
     assert "live_start_time" in live_on
     dynamic = server._test_payload("dynamic", "内容")
-    assert dynamic["content"] == "内容"
+    assert dynamic["body"] == "内容"
+    assert dynamic["action"] == "发布了新动态："
     collection = server._test_payload("collection", "视频")
     assert collection["video_title"] == "视频"
     unknown = server._test_payload("bogus", "x")
-    assert unknown["content"] == "x"
+    assert unknown["body"] == "x"
 
 
 # ----------------------------------------------------------------------

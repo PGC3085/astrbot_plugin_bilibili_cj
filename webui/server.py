@@ -721,8 +721,8 @@ class WebUIServer:
         if event_type == "dynamic":
             return {
                 "name": "测试UP",
-                "type_text": "文字",
-                "content": message,
+                "action": "发布了新动态：",
+                "body": message,
                 "event_time": now,
                 "url": "https://t.bilibili.com/0",
             }
@@ -734,7 +734,7 @@ class WebUIServer:
                 "publish_time": now,
                 "url": "https://www.bilibili.com/video/BV0000",
             }
-        return {"name": "测试推送", "type_text": "测试推送", "content": message}
+        return {"name": "测试推送", "action": "发布了新动态：", "body": message}
 
     def _parse_test_sessions(self, data: dict[str, Any]) -> list[str] | None:
         """解析试推的 ``session`` / ``sessions`` 参数；缺失或类型非法返回 None。
@@ -910,7 +910,7 @@ class WebUIServer:
     def _default_build_chain(self, event_type: str, payload: dict[str, Any]) -> Any:
         """缺省试推链构造器：纯文本（无 AstrBot MessageChain 环境）。"""
         del event_type
-        content = payload.get("content", "")
+        content = payload.get("body") or payload.get("content", "")
         return f"【测试推送】{content}"
 
     async def _default_send_to(self, session: str, chain: Any) -> bool:

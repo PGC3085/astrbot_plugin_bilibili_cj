@@ -60,7 +60,7 @@ _TEMPLATES: dict[str, str] = {
     "live_on": "【B站开播】{name}\n标题：{title}\n分区：{area_name}\n开播时间：{live_start_time}\n链接：{url}",
     "live_off": "【B站下播】{name}\n时长：{duration}\n下播时间：{event_time}\n链接：{url}",
     "live_title": "【B站改标题】{name}\n旧标题：{old_title}\n新标题：{new_title}\n时间：{event_time}\n链接：{url}",
-    "dynamic": "【B站动态】{name}\n{type_text}\n{content}\n时间：{event_time}\n链接：{url}",
+    "dynamic": "【B站动态】{name}{action}\n时间：{event_time}\n{body}\n链接：{url}",
     "collection": "【B站合集更新】{name}\n视频：{video_title}\n合集：{list_name}\n发布时间：{publish_time}\n链接：{url}",
     "alert": "【B站监控告警】{content}",
 }
@@ -119,7 +119,9 @@ def text_for(event_type: str, payload: dict) -> str:
             - ``live_on``: name, title, area_name, live_start_time, url.
             - ``live_off``: name, duration, url.
             - ``live_title``: name, old_title, new_title, url.
-            - ``dynamic``: name, type_text, content, url.
+            - ``dynamic``: name, action, body, event_time, url. ``action`` 为
+              动作短语（含尾部冒号，如 ``发布了新动态：``），``body`` 为
+              正文 + 类型专属行（由 poller 按 DDBOT news.tmpl 逻辑组装）。
             - ``collection``: name, video_title, list_name, publish_time, url.
             ``cover`` (URL, optional) is only consumed by :func:`build_chain`.
 

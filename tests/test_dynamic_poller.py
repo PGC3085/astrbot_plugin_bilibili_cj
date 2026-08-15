@@ -8,8 +8,9 @@
 覆盖计划验收点：
 
 1. 重复 dynamic_id 只推一次（同轮重复 + 跨轮重复）；2. 首轮静默 seed 不推送、
-   第二轮新动态才推送；3. type=8 命中"视频投稿"模板；4. 未知类型走
-   "发布新动态" 通用兜底；5. ``has_more`` 恒真触 10 页上限：告警、不崩溃、
+   第二轮新动态才推送；3. type=8 命中 DDBOT 同款"投稿了视频"句式与标题/
+   简介行；4. 未知类型走"发布了新动态"通用兜底；5. ``has_more`` 恒真触 10
+   页上限：告警、不崩溃、
    旧项不重复推、新项只推一次；6. 全失败 mark-after-send 重试计数 1→2→3，
    3 轮后标记并告警；7. seed 持久化：重建 poller 不重 seed，停机期新动态
    照常推送；8. 2 页 × 3 条翻页全量扫描去重、offset 透传；9. 空动态流不推送
@@ -28,7 +29,7 @@ import pytest
 
 from config import Subscription
 from db import Database
-from poller.dynamic import DYNAMIC_TYPE_HANDLERS, DynamicPoller
+from poller.dynamic import FORWARD_ACTION, TYPE_ACTION, DynamicPoller
 from push import build_chain, format_event_time, send
 from repository import BiliNetworkError
 
@@ -206,7 +207,7 @@ def test_first_round_silent_then_push_new(tmp_path) -> None:
 
 
 def test_type_8_hits_video_template(tmp_path) -> None:
-    """3. type=8 命中"视频投稿"模板：type_text + 标题 + 链接 + UP 名。"""
+    """3. type=8 命中 DDBOT 同款"投稿了视频"句式：动作 + 标题/简介 + 链接 + UP 名。"""
 
     async def scenario() -> None:
         db = Database(tmp_path / "state.db")
@@ -233,8 +234,9 @@ def test_type_8_hits_video_template(tmp_path) -> None:
             assert len(context.sent) == 1
             assert context.sent[0][0] == _SESSION
             text = str(context.sent[0][1])
-            assert "视频投稿" in text
-            assert "标题A" in text
+            assert "测试UP投稿了视频：" in text
+            assert "标题：标题A" in text
+            assert "简介：简介A" in text
             assert "https://t.bilibili.com/100" in text
             assert "测试UP" in text
         finally:
@@ -244,7 +246,7 @@ def test_type_8_hits_video_template(tmp_path) -> None:
 
 
 def test_unknown_type_generic_fallback(tmp_path) -> None:
-    """4. 未知类型走"发布新动态"通用文案，正文回退 desc 文本。"""
+    """4. 未知类型走"发布了新动态"通用文案，正文回退 desc 文本。"""
 
     async def scenario() -> None:
         db = Database(tmp_path / "state.db")
@@ -258,7 +260,7 @@ def test_unknown_type_generic_fallback(tmp_path) -> None:
             await poller.poll()
             assert len(context.sent) == 1
             text = str(context.sent[0][1])
-            assert "发布新动态" in text
+            assert "发布了新动态：" in text
             assert "神秘动态正文" in text
             assert "https://t.bilibili.com/100" in text
         finally:
@@ -510,23 +512,27 @@ def test_cancelled_error_re_raised(tmp_path) -> None:
 
 
 def test_handler_table_covers_required_types() -> None:
-    """补充：计划规定的全部类型码在 DYNAMIC_TYPE_HANDLERS 中（回归闸）。"""
+    """补充：计划规定的全部类型码在 TYPE_ACTION / FORWARD_ACTION 中（回归闸）。"""
 
-    for code in (8, 2, 4, 1, 64, 256, 512, 2048, 4200, 4308, 4300, 4302, 4310):
-        assert code in DYNAMIC_TYPE_HANDLERS
-    assert DYNAMIC_TYPE_HANDLERS[8][0] == "视频投稿"
-    assert DYNAMIC_TYPE_HANDLERS[2][0] == "图片"
-    assert DYNAMIC_TYPE_HANDLERS[4][0] == "文字"
-    assert DYNAMIC_TYPE_HANDLERS[1][0] == "转发"
-    assert DYNAMIC_TYPE_HANDLERS[64][0] == "专栏"
-    assert DYNAMIC_TYPE_HANDLERS[256][0] == "音频"
-    assert DYNAMIC_TYPE_HANDLERS[512][0] == "番剧"
-    assert DYNAMIC_TYPE_HANDLERS[2048][0] == "图文"
-    assert DYNAMIC_TYPE_HANDLERS[4200][0] == "直播分享"
-    assert DYNAMIC_TYPE_HANDLERS[4308][0] == "直播分享"
-    assert DYNAMIC_TYPE_HANDLERS[4300][0] == "收藏夹"
-    assert DYNAMIC_TYPE_HANDLERS[4302][0] == "课程"
-    assert DYNAMIC_TYPE_HANDLERS[4310][0] == "合集更新"
+    for code in (8, 2, 4, 64, 256, 512, 2048, 4200, 4308, 4300, 1024, 4310):
+        assert code in TYPE_ACTION
+    assert TYPE_ACTION[8] == "投稿了视频"
+    assert TYPE_ACTION[2] == "发布了新动态"
+    assert TYPE_ACTION[4] == "发布了新动态"
+    assert TYPE_ACTION[64] == "发布了新专栏"
+    assert TYPE_ACTION[256] == "投稿了新音频"
+    assert TYPE_ACTION[512] == "发布了新动态"
+    assert TYPE_ACTION[2048] == "发表了新动态"
+    assert TYPE_ACTION[4200] == "发布了直播信息"
+    assert TYPE_ACTION[4308] == "发布了直播信息"
+    assert TYPE_ACTION[4300] == "发布了收藏夹"
+    assert TYPE_ACTION[4310] == "更新了合集"
+    # 转发句式（DDBOT 同款）
+    assert FORWARD_ACTION[8] == "转发了{origin}的视频"
+    assert FORWARD_ACTION[64] == "转发了{origin}的专栏"
+    assert FORWARD_ACTION[256] == "转发了{origin}的音频"
+    assert FORWARD_ACTION[4200] == "分享了{origin}的直播"
+    assert FORWARD_ACTION[4300] == "分享了{origin}的收藏夹"
 
 
 def test_dynamic_payload_includes_event_time(tmp_path) -> None:
@@ -651,7 +657,7 @@ def test_polymer_av_dynamic_pushed_end_to_end(tmp_path) -> None:
             assert len(context.sent) == 1
             assert context.sent[0][0] == _SESSION
             text = str(context.sent[0][1])
-            assert "视频投稿" in text
+            assert "投稿了视频" in text
             assert "新视频A" in text
             assert "https://t.bilibili.com/100" in text
             assert "测试UP" in text
@@ -761,8 +767,325 @@ def test_live_share_dynamic_pushed_when_enabled(tmp_path) -> None:
             await poller.poll()
             assert len(context.sent) == 1
             text = str(context.sent[0][1])
-            assert "直播分享" in text
+            assert "发布了直播信息" in text
             assert "https://t.bilibili.com/100" in text
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+# ----------------------------------------------------------------------
+# DDBOT news.tmpl 同款消息构造（动作句式 / 类型专属行 / 转发标注行）
+# ----------------------------------------------------------------------
+
+
+def _polymer_forward_item(dyn_id: int, orig: dict, desc: str = "转发语") -> dict:
+    """构造 polymer 转发动态：``DYNAMIC_TYPE_FORWARD`` + ``orig`` 子条目。"""
+    return {
+        "id_str": str(dyn_id),
+        "type": "DYNAMIC_TYPE_FORWARD",
+        "modules": {
+            "module_author": {"name": "转发者", "pub_ts": 1_700_000_000},
+            "module_dynamic": {
+                "desc": {"text": desc},
+                "major": {"type": "MAJOR_TYPE_NONE"},
+            },
+        },
+        "orig": orig,
+    }
+
+
+def _polymer_orig(type_str: str, name: str, desc: str, major: dict) -> dict:
+    """构造被转发条目（polymer 形状，带 major.type 与对应 major 子键）。"""
+    return {
+        "id_str": "199",
+        "type": type_str,
+        "modules": {
+            "module_author": {"name": name, "pub_ts": 1_699_000_000},
+            "module_dynamic": {"desc": {"text": desc}, "major": major},
+        },
+    }
+
+
+def test_forward_dynamic_ddbot_style(tmp_path) -> None:
+    """转发动态（DDBOT 同款）：``转发了原作者：的动态`` + 原动态标注行 + 原内容。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            orig = _polymer_orig(
+                "DYNAMIC_TYPE_WORD",
+                "原作者",
+                "原内容",
+                {"type": "MAJOR_TYPE_DRAW"},
+            )
+            item = _polymer_forward_item(200, orig)
+            payload = poller._payload(poller.subscription, item, "200", 1)
+            assert payload["action"] == "转发了原作者的动态："
+            assert payload["body"] == "原动态：\n原内容"
+            assert payload["url"] == "https://t.bilibili.com/200"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_forward_of_video_ddbot_style(tmp_path) -> None:
+    """转发视频动态（DDBOT 同款）：``转发了原作者的视频：`` + 原视频标注行 +
+    标题/简介行 + 原视频封面。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            orig = _polymer_orig(
+                "DYNAMIC_TYPE_AV",
+                "原作者",
+                "视频动态语",
+                {
+                    "type": "MAJOR_TYPE_ARCHIVE",
+                    "archive": {
+                        "title": "视频标题",
+                        "desc": "视频简介",
+                        "cover": "https://example.com/c.jpg",
+                    },
+                },
+            )
+            item = _polymer_forward_item(200, orig)
+            payload = poller._payload(poller.subscription, item, "200", 1)
+            assert payload["action"] == "转发了原作者的视频："
+            assert payload["body"] == (
+                "原视频：\n视频动态语\n标题：视频标题\n简介：视频简介"
+            )
+            assert payload["cover"] == "https://example.com/c.jpg"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_forward_of_forward_plain_content(tmp_path) -> None:
+    """转发套转发（DDBOT type=1 分支同款）：不加标注行，直接展示其内容。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            orig = _polymer_orig(
+                "DYNAMIC_TYPE_FORWARD",
+                "中层转发者",
+                "中层内容",
+                {"type": "MAJOR_TYPE_NONE"},
+            )
+            item = _polymer_forward_item(200, orig)
+            payload = poller._payload(poller.subscription, item, "200", 1)
+            assert payload["action"] == "转发了中层转发者的动态："
+            assert payload["body"] == "中层内容"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_forward_without_orig_fallback(tmp_path) -> None:
+    """orig 缺失：降级为 ``转发了动态：`` + 仅转发正文，不崩溃。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            item = {
+                "id_str": "200",
+                "type": "DYNAMIC_TYPE_FORWARD",
+                "modules": {
+                    "module_author": {"name": "转发者", "pub_ts": 1_700_000_000},
+                    "module_dynamic": {
+                        "desc": {"text": "只剩转发语"},
+                        "major": {"type": "MAJOR_TYPE_NONE"},
+                    },
+                },
+            }
+            payload = poller._payload(poller.subscription, item, "200", 1)
+            assert payload["action"] == "转发了动态："
+            assert payload["body"] == "只剩转发语"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_audio_action_with_author_line(tmp_path) -> None:
+    """音频动态：``投稿了新音频：`` + 标题/简介/作者行 + 封面。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            item = {
+                "id_str": "300",
+                "type": "DYNAMIC_TYPE_MUSIC",
+                "modules": {
+                    "module_author": {"name": "UP", "pub_ts": 1_700_000_000},
+                    "module_dynamic": {
+                        "desc": {"text": "来听歌"},
+                        "major": {
+                            "type": "MAJOR_TYPE_MUSIC",
+                            "music": {
+                                "title": "歌曲名",
+                                "intro": "介绍",
+                                "author": "歌手名",
+                                "cover": "https://example.com/m.jpg",
+                            },
+                        },
+                    },
+                },
+            }
+            payload = poller._payload(poller.subscription, item, "300", 256)
+            assert payload["action"] == "投稿了新音频："
+            assert payload["body"] == "来听歌\n标题：歌曲名\n简介：介绍\n作者：歌手名"
+            assert payload["cover"] == "https://example.com/m.jpg"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_medialist_action_ddbot_style(tmp_path) -> None:
+    """收藏夹动态：``发布了收藏夹：`` + 收藏夹标题。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            item = {
+                "id_str": "301",
+                "type": "DYNAMIC_TYPE_MEDIALIST",
+                "modules": {
+                    "module_author": {"name": "UP", "pub_ts": 1_700_000_000},
+                    "module_dynamic": {
+                        "desc": {"text": "整理好了"},
+                        "major": {
+                            "type": "MAJOR_TYPE_MEDIALIST",
+                            "medialist": {"title": "我的收藏夹"},
+                        },
+                    },
+                },
+            }
+            payload = poller._payload(poller.subscription, item, "301", 4300)
+            assert payload["action"] == "发布了收藏夹："
+            assert payload["body"] == "整理好了\n我的收藏夹"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_course_action_ddbot_style(tmp_path) -> None:
+    """课程动态：``转发了{课程作者}的{徽章}：`` + 原课程标题行。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            item = {
+                "id_str": "302",
+                "type": "DYNAMIC_TYPE_COURSES",
+                "modules": {
+                    "module_author": {"name": "UP", "pub_ts": 1_700_000_000},
+                    "module_dynamic": {
+                        "desc": {"text": "推荐课程"},
+                        "major": {
+                            "type": "MAJOR_TYPE_COURSES",
+                            "courses": {
+                                "title": "课程标题",
+                                "badge": "付费课程",
+                                "up_name": "课程作者",
+                                "cover": "https://example.com/k.jpg",
+                            },
+                        },
+                    },
+                },
+            }
+            payload = poller._payload(poller.subscription, item, "302", 4302)
+            assert payload["action"] == "转发了课程作者的付费课程："
+            assert payload["body"] == "推荐课程\n原课程：课程标题"
+            assert payload["cover"] == "https://example.com/k.jpg"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_opus_action_with_title_summary(tmp_path) -> None:
+    """图文动态：``发表了新动态：`` + 标题/正文（summary 可为内嵌 dict）+ 首图封面。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            item = {
+                "id_str": "303",
+                "type": "DYNAMIC_TYPE_WORD",
+                "modules": {
+                    "module_author": {"name": "UP", "pub_ts": 1_700_000_000},
+                    "module_dynamic": {
+                        "desc": {"text": "看图说话"},
+                        "major": {
+                            "type": "MAJOR_TYPE_OPUS",
+                            "opus": {
+                                "title": "图文标题",
+                                "summary": {"text": "图文正文"},
+                                "pics": [{"src": "https://example.com/o.jpg"}],
+                            },
+                        },
+                    },
+                },
+            }
+            payload = poller._payload(poller.subscription, item, "303", 2048)
+            assert payload["action"] == "发表了新动态："
+            assert payload["body"] == "看图说话\n图文标题\n图文正文"
+            assert payload["cover"] == "https://example.com/o.jpg"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_forward_dynamic_pushed_end_to_end(tmp_path) -> None:
+    """转发动态端到端：seed → 推送 → 消息含 DDBOT 转发句式与原内容。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_page([])])
+        context = FakeContext()
+        poller, _ = _make_poller(repo, db, context=context)
+        try:
+            await poller.poll()  # seed 空
+            orig = _polymer_orig(
+                "DYNAMIC_TYPE_WORD",
+                "原作者",
+                "原内容",
+                {"type": "MAJOR_TYPE_DRAW"},
+            )
+            repo.pages = [_page([_polymer_forward_item(200, orig)])]
+            await poller.poll()
+            assert len(context.sent) == 1
+            text = str(context.sent[0][1])
+            assert "转发者转发了原作者的动态：" in text
+            assert "原动态：" in text
+            assert "原内容" in text
+            assert "https://t.bilibili.com/200" in text
         finally:
             await db.close()
 
