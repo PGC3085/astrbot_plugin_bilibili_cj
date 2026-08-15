@@ -2,14 +2,16 @@
 
 职责：
 
-- :class:`TokenBucket`：异步令牌桶（容量 3、速率 ``1/global_min_interval_sec``），
-  由 scheduler 构建并注入各 poller；poller 在每次 B 站请求（含 get_live_info
-  解析 room_id、合集分页 get_videos）前阻塞取牌——全局速率上限，SdkRepository
-  不持有桶。时间驱动（``now`` 可注入时钟），等待时长经 ``sleep`` 注入。
-- :class:`Scheduler`：3 个 per-type 轮询任务（live/dynamic/collection），逐订阅
+- :class:`TokenBucket`：异步令牌桶（容量 3、速率=各启用订阅聚合轮询需求，
+  不低于 ``1/global_min_interval_sec``），由 scheduler 构建并注入各 poller；
+  poller 在**每轮轮询开始时**阻塞取一枚令牌——全局轮询频率上限，保证各订阅
+  实际间隔贴近配置值（不因桶速率过低而被拖慢）；SdkRepository 不持有桶。
+  时间驱动（``now`` 可注入时钟），等待时长经 ``sleep`` 注入。
+- :class:`Scheduler`：**每个订阅一个独立轮询任务**（不再按类型串行），各订阅
   按 ``max(poll_interval_sec, global_min_interval_sec) + uniform(0, jitter)``
-  间隔执行；连续失败指数退避（底数 2、上限 5min）；连续失败 N=10 自动禁用
-  （仅运行时，重启恢复）并向其全部会话推送告警；被禁用订阅每轮跳过。
+  独立间隔执行，互不拖慢；连续失败指数退避（底数 2、上限 5min）；连续失败
+  N=10 自动禁用（仅运行时，重启恢复）并向其全部会话推送告警；被禁用订阅
+  按自身间隔重查状态。
 - 错误信号：轮询前把 ``status[sub_id].last_error`` 置 None，轮询后非 None 即
   本轮出错（轮询器/推送失败都会写 last_error）；另以 ``poller.error_count``
   增量兜底（LivePoller 持有该属性）。dynamic/collection 的轮询错误同样经
@@ -47,7 +49,7 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
     from poller.live import LivePoller  # type: ignore[import-not-found]
     from repository import BiliRepository, SdkRepository  # type: ignore[import-not-found]
 
-#: 令牌桶容量（允许的瞬时并发请求数，随后按速率匀速补充）。
+#: 令牌桶容量（允许的瞬时并发轮询数，随后按速率匀速补充）。
 _BUCKET_CAPACITY: int = 3
 #: 错误退避指数底数。
 _BACKOFF_BASE: float = 2.0
@@ -55,12 +57,8 @@ _BACKOFF_BASE: float = 2.0
 _BACKOFF_MAX_SEC: float = 300.0
 #: 连续失败 N 次后自动禁用订阅。
 _MAX_CONSECUTIVE_ERRORS: int = 10
-#: 某类型无启用订阅时的空闲睡眠（秒），避免空循环忙转。
-_IDLE_SLEEP_SEC: float = 3600.0
 #: 维护任务周期（秒，6 小时）。
 _MAINTENANCE_INTERVAL_SEC: float = 6 * 3600.0
-#: 订阅类型列表（任务创建顺序）。
-_SUB_TYPES: tuple[str, ...] = ("live", "dynamic", "collection")
 
 _logger: logging.Logger | None = None
 
@@ -250,13 +248,27 @@ class Scheduler:
         self._push_title_change = bool(settings.get("push_title_change", True))
 
     def _new_bucket(self) -> TokenBucket:
-        """按当前全局最小间隔重建令牌桶（容量 3、速率 1/global_min）。"""
+        """按当前订阅重建令牌桶（容量 3、速率=聚合轮询需求，见 :meth:`_bucket_rate`）。"""
         return TokenBucket(
             _BUCKET_CAPACITY,
-            1.0 / self._global_min,
+            self._bucket_rate(),
             now=self._now,
             sleep=self._sleep,
         )
+
+    def _bucket_rate(self) -> float:
+        """令牌桶速率：全部启用订阅的聚合轮询需求，不低于 ``1/global_min``。
+
+        每个订阅每轮只取一枚令牌（per-poll 限速），因此速率按
+        ``sum(1 / max(poll_interval_sec, global_min))`` 恰好覆盖配置的轮询
+        频率——桶不会成为瓶颈，各订阅实际间隔贴近配置值；桶容量 3 仅用于
+        吸收多订阅对齐瞬间的突发。
+        """
+        demand = 0.0
+        for sub in self._subscriptions:
+            if sub.enabled:
+                demand += 1.0 / max(float(sub.poll_interval_sec), self._global_min)
+        return max(demand, 1.0 / self._global_min)
 
     def _build_pollers(self) -> dict[str, Any]:
         """按当前订阅构造 poller 映射；每类订阅注入同一把桶的取牌函数。"""
@@ -309,14 +321,14 @@ class Scheduler:
         return pollers
 
     def start(self) -> None:
-        """创建 3 个 per-type 轮询任务（幂等）。"""
+        """为每个订阅创建独立轮询任务（幂等）。"""
         if self._started:
             return
         self._started = True
         self.pollers = self._build_pollers()
-        for sub_type in _SUB_TYPES:
+        for sub in self._subscriptions:
             self._tasks.append(
-                asyncio.create_task(self._run_type(sub_type), name=f"bili-{sub_type}")
+                asyncio.create_task(self._run_sub(sub), name=f"bili-{sub.id[:8]}")
             )
 
     async def stop(self) -> None:
@@ -419,32 +431,24 @@ class Scheduler:
     # 轮询循环
     # ------------------------------------------------------------------
 
-    def _subs_of_type(self, sub_type: str) -> list[Subscription]:
-        """返回当前订阅快照中指定类型的订阅（每轮重读，热感知）。"""
-        return [sub for sub in self._subscriptions if sub.type == sub_type]
+    async def _run_sub(self, sub: Subscription) -> None:
+        """单个订阅的独立轮询循环：按自身间隔轮询，互不影响。
 
-    async def _run_type(self, sub_type: str) -> None:
-        """单个类型的轮询循环：逐订阅按间隔执行，跳过禁用项。
-
-        被禁用（enabled=False 或运行时自动禁用）的订阅每轮都重新检查；
-        无任何启用订阅时空闲睡眠避免忙转。``CancelledError`` 透传。
+        每轮先按 ``max(poll_interval_sec, global_min) + jitter`` 睡眠，再检查
+        启用状态（enabled / 运行时自动禁用）决定是否轮询——被禁用的订阅也按
+        自身间隔重查，重新启用后无需重建即可恢复。``CancelledError`` 透传。
         """
         while True:
-            polled = False
-            for sub in self._subs_of_type(sub_type):
-                if not sub.enabled or self._is_auto_disabled(sub.id):
-                    continue
-                poller = self.pollers.get(sub.id)
-                if poller is None:
-                    continue
-                polled = True
-                await self._sleep(self._interval_for(sub))
-                try:
-                    await self._poll_one(sub, poller)
-                except asyncio.CancelledError:
-                    raise
-            if not polled:
-                await self._sleep(_IDLE_SLEEP_SEC)
+            await self._sleep(self._interval_for(sub))
+            if not sub.enabled or self._is_auto_disabled(sub.id):
+                continue
+            poller = self.pollers.get(sub.id)
+            if poller is None:
+                continue
+            try:
+                await self._poll_one(sub, poller)
+            except asyncio.CancelledError:
+                raise
 
     def _interval_for(self, sub: Subscription) -> float:
         """订阅单轮间隔：``max(poll_interval_sec, global_min) + uniform(0, jitter)``。"""

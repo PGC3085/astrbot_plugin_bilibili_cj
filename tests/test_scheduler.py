@@ -12,8 +12,9 @@
    自动禁用 + 告警推送；第 11 轮整轮跳过；status.auto_disabled。4. 逐订阅
    间隔（两个不同间隔的 live 订阅 → 睡眠序列 [10,20,10,20,...]）。5. 重建：
    旧任务取消、新 poller 构建、status/auto-disable 保留、clear_disabled 清空。
-   6. 限速：合集多页取牌，桶空时请求阻塞直到时钟推进（假 sleep 受控模式）。
-   7. stop() 干净取消全部任务。8. 维护任务每 6h 调一次 db.prune_old。
+   6. 限速：per-poll 令牌（合集多页轮询不再页间阻塞）+ 桶容量 3 时第 4 个
+   订阅阻塞（假 sleep 受控模式）。7. stop() 干净取消全部任务。8. 维护任务
+   每 6h 调一次 db.prune_old。
 """
 
 from __future__ import annotations
@@ -483,6 +484,82 @@ def test_per_sub_interval_respected() -> None:
     asyncio.run(scenario())
 
 
+def test_same_type_subs_poll_independently() -> None:
+    """3 个同类型订阅各自独立轮询：先各自睡满自身间隔再轮询，互不串行等待。
+
+    旧实现的 per-type 串行循环会先 sleep→poll→sleep→poll；新实现为每个订阅
+    一个任务，因此事件序列以 3 个连续 sleep 开头（每个订阅先睡满自己的间隔）。
+    """
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        events: list[str] = []
+
+        async def recording_sleep(sec: float) -> None:
+            events.append("sleep")
+            clock.tick(sec)
+            await asyncio.sleep(0)
+
+        repo = LiveFakeRepo()
+
+        async def recording_room_info(room_id: int) -> dict:
+            events.append("poll")
+            return dict(_room(0))
+
+        repo.get_room_info = recording_room_info  # type: ignore[method-assign]
+        subs = [_live_sub(f"live-{i}", 10086 + i, interval=10) for i in range(3)]
+        scheduler, _ = _make_scheduler(
+            subs,
+            repo,
+            InstantDb(),
+            clock,
+            recording_sleep,
+            poll_settings={"global_min_interval_sec": 1, "poll_jitter_sec": 0},
+        )
+        scheduler.start()
+        await _drive(lambda: len(events) >= 9)
+        # 前 3 个事件都是 sleep：3 个订阅各自先睡满自身间隔，互不串行
+        assert events[:3] == ["sleep", "sleep", "sleep"]
+        # 之后每个订阅按 轮询→睡眠 节奏推进（poll 后紧跟自己的 sleep）
+        assert events[3:9] == ["poll", "sleep", "poll", "sleep", "poll", "sleep"]
+        await scheduler.stop()
+
+    asyncio.run(scenario())
+
+
+def test_bucket_rate_equals_aggregate_demand() -> None:
+    """令牌桶速率 = max(聚合轮询需求, 1/global_min)，保证桶不拖慢配置间隔。"""
+
+    subs = [_live_sub(f"live-{i}", 10086 + i, interval=120) for i in range(3)]
+    scheduler = Scheduler(
+        subscriptions=subs,
+        credential_cfg={},
+        repo=object(),
+        db=None,
+        build_chain=build_chain,
+        send=send,
+        context=FakeContext(),
+        status={},
+        retry_counts={},
+        poll_settings={"global_min_interval_sec": 60, "poll_jitter_sec": 0},
+    )
+    assert abs(scheduler._bucket_rate() - 3 / 120) < 1e-9  # 聚合需求高于下限
+
+    single = Scheduler(
+        subscriptions=[_live_sub("live-1", 10086, interval=300)],
+        credential_cfg={},
+        repo=object(),
+        db=None,
+        build_chain=build_chain,
+        send=send,
+        context=FakeContext(),
+        status={},
+        retry_counts={},
+        poll_settings={"global_min_interval_sec": 60, "poll_jitter_sec": 0},
+    )
+    assert abs(single._bucket_rate() - 1 / 60) < 1e-9  # 需求低于下限时取 1/global_min
+
+
 # ----------------------------------------------------------------------
 # 6. 重建 + clear_disabled
 # ----------------------------------------------------------------------
@@ -545,8 +622,8 @@ def test_rebuild_preserves_status_and_clear_disabled() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_rate_limit_blocks_until_clock_advance() -> None:
-    """合集 2 页/轮：容量 3、速率 0.2/s（global_min=5），第 3 轮第 2 页阻塞。"""
+def test_per_poll_token_multi_page_not_blocked() -> None:
+    """per-poll 限速：每轮只取一枚令牌，合集 2 页/轮不再在页间阻塞。"""
 
     async def scenario() -> None:
         clock = FakeClock()
@@ -564,21 +641,44 @@ def test_rate_limit_blocks_until_clock_advance() -> None:
             poll_settings={"global_min_interval_sec": 5, "poll_jitter_sec": 0},
         )
         scheduler.start()
-        await _settle()  # 让三个任务先注册首轮睡眠，再开始受控推进
-        # 轮 1：间隔 5s + 2 页请求（3 枚初始令牌够用，不阻塞）
+        await _settle()  # 任务先注册首轮睡眠，再开始受控推进
+        # 每轮推进 5s：一轮取一枚令牌，2 页请求全部立即完成（无页间阻塞）
         await sleep.advance(5)
         assert repo.calls == 2
-        # 轮 2：再补 1 枚，2 页仍够用
         await sleep.advance(5)
         assert repo.calls == 4
-        # 轮 3：第 1 页耗尽最后一枚 → 第 2 页阻塞等待补充
-        await sleep.advance(5)
-        assert repo.calls == 5  # 阻塞：请求停在第 2 页
-        await _settle()  # 无时钟推进 → 仍阻塞，请求数不增长
-        assert repo.calls == 5
-        # 时钟再推进 5s（补 1 枚）→ 第 2 页放行
         await sleep.advance(5)
         assert repo.calls == 6
+        await scheduler.stop()
+
+    asyncio.run(scenario())
+
+
+def test_rate_limit_capacity_blocks_fourth_sub() -> None:
+    """桶容量 3：4 个订阅同时轮询时第 4 个阻塞在令牌桶（时钟推进前不放行）。"""
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        sleep = ControlledSleep(clock)
+        repo = CollectionFakeRepo([{"bvid": "BV0001", "pubdate": 1_700_000_000}])
+        subs = [_collection_sub(f"col-{i}", 10086 + i, interval=5) for i in range(4)]
+        scheduler, _ = _make_scheduler(
+            subs,
+            repo,
+            InstantDb(),
+            clock,
+            sleep,
+            poll_settings={"global_min_interval_sec": 5, "poll_jitter_sec": 0},
+        )
+        scheduler.start()
+        await _settle()  # 4 个任务先注册首轮睡眠
+        await sleep.advance(5)
+        await _settle()
+        # 容量 3：仅 3 个订阅完成首轮轮询，第 4 个阻塞等待令牌
+        assert repo.calls == 3
+        # 无时钟推进 → 仍阻塞，请求数不增长
+        await _settle()
+        assert repo.calls == 3
         await scheduler.stop()
 
     asyncio.run(scenario())

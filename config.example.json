@@ -18,6 +18,12 @@
         "port": 8765,
         "token": ""
     },
+    "login_monitor": {
+        "enabled": true,
+        "interval_sec": 3600,
+        "fail_threshold": 3,
+        "notify_session": ""
+    },
     "subscriptions": [
         {
             "type": "live",

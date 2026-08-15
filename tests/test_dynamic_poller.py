@@ -485,7 +485,7 @@ def test_cancelled_error_re_raised(tmp_path) -> None:
 def test_handler_table_covers_required_types() -> None:
     """补充：计划规定的全部类型码在 DYNAMIC_TYPE_HANDLERS 中（回归闸）。"""
 
-    for code in (8, 2, 4, 1, 64, 256, 2048, 4200, 4308, 4300, 4302):
+    for code in (8, 2, 4, 1, 64, 256, 512, 2048, 4200, 4308, 4300, 4302, 4310):
         assert code in DYNAMIC_TYPE_HANDLERS
     assert DYNAMIC_TYPE_HANDLERS[8][0] == "视频投稿"
     assert DYNAMIC_TYPE_HANDLERS[2][0] == "图片"
@@ -493,11 +493,13 @@ def test_handler_table_covers_required_types() -> None:
     assert DYNAMIC_TYPE_HANDLERS[1][0] == "转发"
     assert DYNAMIC_TYPE_HANDLERS[64][0] == "专栏"
     assert DYNAMIC_TYPE_HANDLERS[256][0] == "音频"
+    assert DYNAMIC_TYPE_HANDLERS[512][0] == "番剧"
     assert DYNAMIC_TYPE_HANDLERS[2048][0] == "图文"
     assert DYNAMIC_TYPE_HANDLERS[4200][0] == "直播分享"
     assert DYNAMIC_TYPE_HANDLERS[4308][0] == "直播分享"
     assert DYNAMIC_TYPE_HANDLERS[4300][0] == "收藏夹"
     assert DYNAMIC_TYPE_HANDLERS[4302][0] == "课程"
+    assert DYNAMIC_TYPE_HANDLERS[4310][0] == "合集更新"
 
 
 def test_dynamic_payload_includes_event_time(tmp_path) -> None:
@@ -519,6 +521,116 @@ def test_dynamic_payload_includes_event_time(tmp_path) -> None:
             }
             payload = poller._payload(poller.subscription, item, "100", 4)
             assert payload["event_time"] == format_event_time(1_700_000_000)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def _polymer_item(
+    dyn_id: int,
+    type_str: str,
+    *,
+    title: str = "",
+    desc: str = "",
+    cover: str = "",
+) -> dict:
+    """构造 polymer feed/space 形状的 item（``id_str`` + 字符串枚举 ``type``）。"""
+    major: dict = {}
+    if type_str == "DYNAMIC_TYPE_AV":
+        major = {"archive": {"title": title, "desc": desc, "cover": cover}}
+        major["type"] = "MAJOR_TYPE_ARCHIVE"
+    elif type_str == "DYNAMIC_TYPE_DRAW":
+        major = {"draw": {"title": title, "items": [{"src": cover}] if cover else []}}
+        major["type"] = "MAJOR_TYPE_DRAW"
+    elif type_str == "DYNAMIC_TYPE_WORD" and title:
+        # 图文：WORD + MAJOR_TYPE_OPUS
+        major = {"opus": {"title": title, "summary": desc, "pics": []}}
+        major["type"] = "MAJOR_TYPE_OPUS"
+    elif type_str == "DYNAMIC_TYPE_LIVE_RCMD":
+        major = {"live_rcmd": {"title": title, "desc": desc, "cover": cover}}
+        major["type"] = "MAJOR_TYPE_LIVE_RCMD"
+    elif type_str == "DYNAMIC_TYPE_UGC_SEASON":
+        major = {"ugc_season": {"title": title, "desc": desc, "cover": cover}}
+        major["type"] = "MAJOR_TYPE_UGC_SEASON"
+    return {
+        "id_str": str(dyn_id),
+        "type": type_str,
+        "modules": {
+            "module_author": {"name": "测试UP", "pub_ts": 1_700_000_000},
+            "module_dynamic": {"desc": {"text": desc}, "major": major},
+        },
+    }
+
+
+def test_polymer_item_id_and_type_parsed(tmp_path) -> None:
+    """polymer feed/space 形状：id_str 提取、字符串枚举 type 映射正确。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([_page([])]), db)
+        try:
+            av = _polymer_item(100, "DYNAMIC_TYPE_AV", title="视频A", desc="简介A")
+            assert poller._dynamic_id(av) == "100"
+            assert poller._dynamic_type(av) == 8
+            draw = _polymer_item(101, "DYNAMIC_TYPE_DRAW", cover="https://x/1.jpg")
+            assert poller._dynamic_id(draw) == "101"
+            assert poller._dynamic_type(draw) == 2
+            word = _polymer_item(102, "DYNAMIC_TYPE_WORD", desc="纯文字")
+            assert poller._dynamic_type(word) == 4
+            opus = _polymer_item(103, "DYNAMIC_TYPE_WORD", title="图文", desc="正文")
+            assert poller._dynamic_type(opus) == 2048  # WORD + MAJOR_TYPE_OPUS → 图文
+            forward = _polymer_item(104, "DYNAMIC_TYPE_FORWARD", desc="转发语")
+            assert poller._dynamic_type(forward) == 1
+            live_rcmd = _polymer_item(105, "DYNAMIC_TYPE_LIVE_RCMD", desc="开播了")
+            assert poller._dynamic_type(live_rcmd) == 4308
+            medialist = _polymer_item(106, "DYNAMIC_TYPE_MEDIALIST", desc="收藏夹")
+            assert poller._dynamic_type(medialist) == 4300
+            ugc = _polymer_item(107, "DYNAMIC_TYPE_UGC_SEASON", desc="合集更新")
+            assert poller._dynamic_type(ugc) == 4310
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_polymer_av_dynamic_pushed_end_to_end(tmp_path) -> None:
+    """polymer 形状的投稿视频动态能正常 seed → 检测 → 推送（回归闸）。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_page([])])
+        context = FakeContext()
+        poller, _ = _make_poller(repo, db, context=context)
+        try:
+            await poller.poll()  # seed 空
+            assert context.sent == []
+            repo.pages = [
+                _page(
+                    [
+                        _polymer_item(
+                            100,
+                            "DYNAMIC_TYPE_AV",
+                            title="新视频A",
+                            desc="简介A",
+                            cover="https://example.com/c.jpg",
+                        )
+                    ]
+                )
+            ]
+            await poller.poll()
+            assert len(context.sent) == 1
+            assert context.sent[0][0] == _SESSION
+            text = str(context.sent[0][1])
+            assert "视频投稿" in text
+            assert "新视频A" in text
+            assert "https://t.bilibili.com/100" in text
+            assert "测试UP" in text
+            # 跨轮去重：不再重复推送
+            await poller.poll()
+            assert len(context.sent) == 1
         finally:
             await db.close()
 

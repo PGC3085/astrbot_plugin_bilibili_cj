@@ -11,10 +11,13 @@
   ``retry_counts[sub_id][dynamic_id]``（main.py 持有、跨重建保留）计数重试，
   达 :data:`_MAX_RETRY_ROUNDS` 轮上限后仍标记并告警（行保留即"仍标记"）。
 - :data:`DYNAMIC_TYPE_HANDLERS` 按类型码给出文案与内容格式化函数：
-  8=视频投稿、2=图片、4=文字、1=转发、64=专栏、256=音频、2048=图文、
-  4200/4308=直播分享、4300=收藏夹、4302=课程，其余走通用"发布新动态"。
-  字段提取对新 API（``modules.module_dynamic.desc`` / ``major.*``）与旧 API
-  （``desc`` / ``card`` JSON）均防御，缺失键返回空串。
+  8=视频投稿、2=图片、4=文字、1=转发、64=专栏、256=音频、512=番剧、2048=图文、
+  4200/4308=直播分享、4300=收藏夹、4302=课程、4310=合集更新，其余走通用
+  "发布新动态"。
+- 字段提取兼容两代接口：新 polymer API（``id_str`` 动态 id、字符串枚举
+  ``type``（``DYNAMIC_TYPE_*``）、``modules.module_dynamic.desc`` /
+  ``major.*``）与旧 API（``desc`` / ``card`` JSON、整数 ``type``），缺失键
+  返回空串；纯文字与图文共用 ``DYNAMIC_TYPE_WORD``，按 ``major.type`` 区分。
 - 仓库/未知异常吞掉记日志；``asyncio.CancelledError`` 透传。
 
 ``build_chain`` / ``send`` 由 main.py 注入 push 模块实现（离线测试可替换）。
@@ -49,6 +52,26 @@ _SEED_TABLE: str = "dynamic_state"
 _DYNAMIC_URL_TMPL: str = "https://t.bilibili.com/{}"
 #: 未知动态类型的通用文案。
 _GENERIC_TYPE_TEXT: str = "发布新动态"
+
+#: 新 API（polymer feed/space）动态类型字符串枚举 → 内部类型码（沿用旧 API 整数码）。
+_DYNAMIC_TYPE_ENUM_MAP: dict[str, int] = {
+    "DYNAMIC_TYPE_AV": 8,
+    "DYNAMIC_TYPE_DRAW": 2,
+    "DYNAMIC_TYPE_WORD": 4,
+    "DYNAMIC_TYPE_FORWARD": 1,
+    "DYNAMIC_TYPE_ARTICLE": 64,
+    "DYNAMIC_TYPE_MUSIC": 256,
+    "DYNAMIC_TYPE_PGC": 512,
+    "DYNAMIC_TYPE_LIVE": 4200,
+    "DYNAMIC_TYPE_LIVE_RCMD": 4308,
+    "DYNAMIC_TYPE_MEDIALIST": 4300,
+    "DYNAMIC_TYPE_COMMON_SQUARE": 4300,
+    "DYNAMIC_TYPE_COURSES": 4302,
+    "DYNAMIC_TYPE_COURSES_SEASON": 4302,
+    "DYNAMIC_TYPE_COURSES_BATCH": 4302,
+    "DYNAMIC_TYPE_UGC_SEASON": 4310,
+    "DYNAMIC_TYPE_NONE": 0,
+}
 
 #: 格式化函数签名：``(item, 正文文本) -> (content, cover_url)``。
 _Formatter = Callable[[dict[str, Any], str], tuple[str, str]]
@@ -115,27 +138,36 @@ def _card(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _title_body_cover(
-    item: dict[str, Any], major_key: str, body_keys: tuple[str, ...]
+    item: dict[str, Any], major_keys: tuple[str, ...], body_keys: tuple[str, ...]
 ) -> tuple[str, str, str]:
-    """统一提取 (标题, 正文, 封面)：新 API ``major`` 优先，旧 API ``card`` 兜底。"""
-    major = _major(item, major_key)
+    """统一提取 (标题, 正文, 封面)：按候选 key 依次尝试，新 API ``major`` 优先，旧 API ``card`` 兜底。
+
+    同一内部类型码可能对应多种 polymer major 子键（如直播分享同时存在
+    ``live`` / ``live_rcmd``），因此 ``major_keys`` 为候选列表。
+    """
     card = _card(item)
-    title = _text(major.get("title") or card.get("title"))
-    body = ""
-    for key in body_keys:
-        value = major.get(key) or card.get(key)
-        if value:
-            body = _text(value)
-            break
-    cover = _text(major.get("cover") or major.get("pic") or card.get("pic"))
-    return title, body, cover
+    for major_key in major_keys:
+        major = _major(item, major_key)
+        title = _text(major.get("title") or card.get("title"))
+        body = ""
+        for key in body_keys:
+            value = major.get(key) or card.get(key)
+            if value:
+                body = _text(value)
+                break
+        cover = _text(major.get("cover") or major.get("pic") or card.get("pic"))
+        if title or body or cover:
+            return title, body, cover
+    return "", "", ""
 
 
-def _major_formatter(major_key: str, body_keys: tuple[str, ...]) -> _Formatter:
-    """构造单 major 子键的 (content, cover) 格式化函数（desc 兜底）。"""
+def _major_formatter(
+    major_keys: tuple[str, ...], body_keys: tuple[str, ...]
+) -> _Formatter:
+    """构造多候选 major 子键的 (content, cover) 格式化函数（desc 兜底）。"""
 
     def formatter(item: dict[str, Any], desc: str) -> tuple[str, str]:
-        title, body, cover = _title_body_cover(item, major_key, body_keys)
+        title, body, cover = _title_body_cover(item, major_keys, body_keys)
         return _join(title, body) or desc, cover
 
     return formatter
@@ -160,18 +192,27 @@ def _format_plain(item: dict[str, Any], desc: str) -> tuple[str, str]:
 
 
 #: 动态类型码 -> (类型文案, 内容格式化函数)。
+#
+# major 候选 key 以新 API（polymer feed/space）为准并兼容旧 API：
+# ``live``/``live_rcmd``（直播分享）、``pgc``（剧集）、``medialist``/
+# ``common``（收藏夹/一般分享）、``courses``（课程）、``ugc_season``（合集）。
 DYNAMIC_TYPE_HANDLERS: dict[int, tuple[str, _Formatter]] = {
-    8: ("视频投稿", _major_formatter("archive", ("desc",))),
+    8: ("视频投稿", _major_formatter(("archive",), ("desc",))),
     2: ("图片", _format_draw),
     4: ("文字", _format_plain),
     1: ("转发", _format_plain),
-    64: ("专栏", _major_formatter("article", ("desc", "summary"))),
-    256: ("音频", _major_formatter("music", ("intro", "desc"))),
-    2048: ("图文", _major_formatter("opus", ("summary", "desc"))),
-    4200: ("直播分享", _major_formatter("live", ("desc",))),
-    4308: ("直播分享", _major_formatter("live", ("desc",))),
-    4300: ("收藏夹", _major_formatter("mylist", ("desc",))),
-    4302: ("课程", _major_formatter("course", ("desc",))),
+    64: ("专栏", _major_formatter(("article",), ("desc", "summary"))),
+    256: ("音频", _major_formatter(("music",), ("intro", "desc"))),
+    512: ("番剧", _major_formatter(("pgc",), ("desc",))),
+    2048: ("图文", _major_formatter(("opus",), ("summary", "desc"))),
+    4200: ("直播分享", _major_formatter(("live", "live_rcmd"), ("desc",))),
+    4308: ("直播分享", _major_formatter(("live_rcmd", "live"), ("desc",))),
+    4300: (
+        "收藏夹",
+        _major_formatter(("medialist", "mylist", "common"), ("desc", "title")),
+    ),
+    4302: ("课程", _major_formatter(("courses", "course"), ("desc",))),
+    4310: ("合集更新", _major_formatter(("ugc_season",), ("desc",))),
 }
 
 
@@ -190,8 +231,8 @@ class DynamicPoller:
         retry_counts: main.py 持有的重试计数 dict（``{sub_id: {dynamic_id: n}}``），
             跨 poller 重建保留；``initialize()`` 清空即重启后重新计数。
         logger: 显式 logger；缺省用插件统一 logger。
-        acquire: 每次 B 站请求前调用的异步取牌函数（调度器注入令牌桶）；
-            缺省为无操作，行为不变。
+        acquire: 每轮轮询开始前调用的异步取牌函数（调度器注入令牌桶，
+            per-poll 限速）；缺省为无操作，行为不变。
     """
 
     def __init__(
@@ -225,9 +266,11 @@ class DynamicPoller:
     async def poll(self) -> None:
         """执行一轮动态扫描；仓库/未知异常吞掉记日志，不向上抛出。
 
+        轮询开始前取一枚令牌（per-poll 限速：每轮只取一枚，轮内分页请求不限速）。
         ``asyncio.CancelledError`` 透传（任务取消属正常 shutdown 路径）。
         """
         try:
+            await self._acquire()
             await self._poll_once()
         except asyncio.CancelledError:
             raise
@@ -261,7 +304,6 @@ class DynamicPoller:
         offset: str | int = 0
         pages = 0
         while True:
-            await self._acquire()
             resp = await self.repo.get_dynamics(uid, offset=offset)
             pages += 1
             items = resp.get("items")
@@ -361,8 +403,9 @@ class DynamicPoller:
         return str(name).strip() if name else ""
 
     def _dynamic_id(self, item: dict[str, Any]) -> str:
-        """动态 ID：新 API ``id``，旧 API ``desc.dynamic_id*`` 兜底；取不到返回空串。"""
-        raw = _dig(item, "id")
+        """动态 ID：新 API ``id_str``（polymer feed/space，仅此字段）优先，
+        旧 API ``desc.dynamic_id*`` 兜底；取不到返回空串。"""
+        raw = _dig(item, "id_str") or _dig(item, "id")
         if raw is None:
             desc = item.get("desc")
             if isinstance(desc, dict):
@@ -374,8 +417,18 @@ class DynamicPoller:
         return str(raw).strip()
 
     def _dynamic_type(self, item: dict[str, Any]) -> int:
-        """动态类型码：新 API ``type``，旧 API ``desc.type`` 兜底；非法返回 0。"""
+        """动态类型码：新 API 字符串枚举（``DYNAMIC_TYPE_*``），旧 API ``desc.type``
+        整数兜底；纯文字与图文共用 ``DYNAMIC_TYPE_WORD``，按 ``major.type`` 区分。"""
         raw = _dig(item, "type")
+        if isinstance(raw, str) and raw:
+            code = _DYNAMIC_TYPE_ENUM_MAP.get(raw)
+            if code is None:
+                return 0
+            if code == 4:
+                major_type = _dig(item, "modules", "module_dynamic", "major", "type")
+                if major_type == "MAJOR_TYPE_OPUS":
+                    return 2048  # 图文
+            return code
         if raw is None:
             desc = item.get("desc")
             if isinstance(desc, dict):

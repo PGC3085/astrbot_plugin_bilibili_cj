@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 
@@ -88,6 +89,15 @@ _REQUIRED_CREDENTIAL_FIELDS: tuple[str, ...] = ("sessdata", "bili_jct", "dedeuse
 #: 可选凭据字段（缺失不告警）：buvid3/buvid4 为设备指纹，ac_time_value 仅用于刷新。
 _OPTIONAL_CREDENTIAL_FIELDS: tuple[str, ...] = ("buvid3", "buvid4", "ac_time_value")
 
+#: 登录状态监控默认校验间隔（秒）。
+_LOGIN_MONITOR_DEFAULT_INTERVAL: int = 3600
+#: 登录状态监控默认失败通知阈值（连续失败次数）。
+_LOGIN_MONITOR_DEFAULT_THRESHOLD: int = 3
+#: 登录校验间隔下限（秒，低于此值钳制）。
+_LOGIN_MONITOR_MIN_INTERVAL: int = 60
+#: 登录失败通知阈值下限（低于此值钳制）。
+_LOGIN_MONITOR_MIN_THRESHOLD: int = 1
+
 #: ``request_rebuild`` 的三态返回：解析失败 / 配置一致未重建 / 已实际重建。
 RebuildResult = Literal["parse-failed", "no-op", "rebuilt"]
 
@@ -110,6 +120,11 @@ def _get_logger() -> logging.Logger:
 def _type_label(sub_type: str) -> str:
     """返回订阅类型的中文标签，未知类型原样返回。"""
     return _SUB_TYPE_LABELS.get(sub_type, sub_type)
+
+
+def _now_iso() -> str:
+    """当前 UTC 时间的 ISO-8601 字符串（前端按 UTC+8 展示）。"""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _register_command(command_name: str, alias: set[str] | None = None):
@@ -757,6 +772,7 @@ class PluginLifecycle:
         reloader: Any,
         logger: logging.Logger | None = None,
         webui: Any = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self.config = config
         self.context = context
@@ -766,6 +782,9 @@ class PluginLifecycle:
         self.reloader = reloader
         self._logger: logging.Logger = logger if logger is not None else _get_logger()
         self.webui: Any = webui
+        self._sleep: Callable[[float], Awaitable[None]] = (
+            sleep if sleep is not None else asyncio.sleep
+        )
         self._closing: bool = False
         #: 与 scheduler.status 共享的 runtime status dict（initialize 后可用）。
         self.status: dict[str, Any] = {}
@@ -773,8 +792,14 @@ class PluginLifecycle:
         self._maintenance_task: asyncio.Task[None] | None = None
         #: config watcher 任务稳定引用。
         self._watcher_task: asyncio.Task[None] | None = None
-        #: 登录状态校验任务稳定引用（启动时后台执行一次，terminate 时取消）。
-        self._login_check_task: asyncio.Task[None] | None = None
+        #: 登录状态监控任务稳定引用（周期性校验，terminate 时取消）。
+        self._login_monitor_task: asyncio.Task[None] | None = None
+        #: 最近一次登录校验通过时间（UTC ISO；None = 尚未通过）。
+        self._login_last_ok_at: str | None = None
+        #: 连续登录校验失败次数。
+        self._login_consecutive_failures: int = 0
+        #: 最近一次登录校验失败原因（None = 无失败）。
+        self._login_last_error: str | None = None
 
     # ------------------------------------------------------------------
     # 生产工厂（真实组件装配）
@@ -881,10 +906,7 @@ class PluginLifecycle:
         self._closing = False
         await self.db.init()
         self._log_credential_status()
-        if self._credential_cfg.get("sessdata"):
-            self._login_check_task = asyncio.create_task(
-                self._log_login_status(), name="bili-login-check"
-            )
+        self._start_login_monitor()
         if self.webui is None and self._webui_enabled():
             self.webui = self._build_webui()
         if self.webui is not None:
@@ -933,22 +955,141 @@ class PluginLifecycle:
         else:
             self._logger.info("B 站凭据已配置（sessdata/bili_jct/dedeuserid）。")
 
-    async def _log_login_status(self) -> None:
-        """后台校验 B 站登录状态并记录结果（失败不阻断启动）。"""
+    # ------------------------------------------------------------------
+    # 登录状态监控（周期校验 + 连续失败告警）
+    # ------------------------------------------------------------------
+
+    def _login_monitor_cfg(self) -> dict[str, Any]:
+        """读取 ``login_monitor`` 配置组（缺失返回空 dict）。"""
+        raw = self._config_raw(self.config)
+        cfg = raw.get("login_monitor")
+        return dict(cfg) if isinstance(cfg, dict) else {}
+
+    def _login_monitor_enabled(self) -> bool:
+        """是否启用登录状态监控（schema 缺省 true）。"""
+        return bool(self._login_monitor_cfg().get("enabled", True))
+
+    def _login_monitor_interval(self) -> float:
+        """登录校验间隔（秒），钳制到 :data:`_LOGIN_MONITOR_MIN_INTERVAL` 以上。"""
+        raw = self._login_monitor_cfg().get("interval_sec")
+        try:
+            interval = (
+                float(raw) if raw is not None else _LOGIN_MONITOR_DEFAULT_INTERVAL
+            )
+        except (TypeError, ValueError):
+            interval = _LOGIN_MONITOR_DEFAULT_INTERVAL
+        return max(float(_LOGIN_MONITOR_MIN_INTERVAL), interval)
+
+    def _login_monitor_threshold(self) -> int:
+        """登录失败通知阈值（次），钳制到 :data:`_LOGIN_MONITOR_MIN_THRESHOLD` 以上。"""
+        raw = self._login_monitor_cfg().get("fail_threshold")
+        try:
+            threshold = (
+                int(raw) if raw is not None else _LOGIN_MONITOR_DEFAULT_THRESHOLD
+            )
+        except (TypeError, ValueError):
+            threshold = _LOGIN_MONITOR_DEFAULT_THRESHOLD
+        return max(_LOGIN_MONITOR_MIN_THRESHOLD, threshold)
+
+    def _start_login_monitor(self) -> None:
+        """启动登录状态监控任务（幂等；无 sessdata 或已关闭时不启动）。"""
+        if not (self._credential_cfg.get("sessdata") or ""):
+            return
+        if not self._login_monitor_enabled():
+            return
+        if self._login_monitor_task is None or self._login_monitor_task.done():
+            self._login_monitor_task = asyncio.create_task(
+                self._login_monitor_loop(), name="bili-login-monitor"
+            )
+
+    async def _login_monitor_loop(self) -> None:
+        """周期性校验 B 站登录状态；连续失败达阈值时通知指定会话。
+
+        首次进入立即校验一次，之后每 ``interval_sec`` 校验一次；失败累计连续
+        次数、达阈值时发送告警；成功后清零并记录通过时间。每轮重读配置，
+        关闭监控（``enabled=false``）后自然退出。
+        """
+        while True:
+            if not self._login_monitor_enabled():
+                return
+            try:
+                await self._check_login_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 监控任务不允许未捕获异常
+                self._logger.error("登录状态监控异常: %s", exc, exc_info=True)
+            await self._sleep(self._login_monitor_interval())
+
+    async def _check_login_once(self) -> bool:
+        """执行一次登录校验并更新监控状态；返回是否通过。"""
         checker = getattr(self.scheduler, "check_login", None)
         if not callable(checker):
-            return
+            return True
         try:
             info = await checker()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 - 登录校验失败仅告警，不阻断启动
+        except Exception as exc:  # noqa: BLE001 - 校验失败仅告警，不中断监控
+            self._login_consecutive_failures += 1
+            self._login_last_error = str(exc)
             self._logger.warning("B 站登录状态校验失败: %s", exc)
-            return
+            await self._maybe_notify_login_failure()
+            return False
         if not info:
-            return
+            self._login_consecutive_failures += 1
+            self._login_last_error = "登录校验返回空"
+            self._logger.warning("B 站登录状态校验返回空")
+            await self._maybe_notify_login_failure()
+            return False
+        self._login_consecutive_failures = 0
+        self._login_last_error = None
+        self._login_last_ok_at = _now_iso()
         name = info.get("uname") or info.get("mid") or "已登录"
         self._logger.info("B 站登录校验通过：%s", name)
+        return True
+
+    async def _maybe_notify_login_failure(self) -> None:
+        """连续失败次数恰达阈值时向 notify_session 发送一次告警。"""
+        threshold = self._login_monitor_threshold()
+        if self._login_consecutive_failures != threshold:
+            return
+        text = (
+            f"B站登录状态连续 {threshold} 次校验失败，请检查 Cookie 是否过期"
+            f"（最近错误：{self._login_last_error or '未知'}）"
+        )
+        await self._send_login_alert(text)
+
+    async def _send_login_alert(self, text: str) -> bool:
+        """向 ``login_monitor.notify_session`` 发送告警；未配置会话时仅记日志。"""
+        session = str(self._login_monitor_cfg().get("notify_session") or "").strip()
+        if not session:
+            self._logger.warning("登录状态告警（未配置通知会话）: %s", text)
+            return False
+        chain = push.build_chain("alert", {"content": text})
+        try:
+            ok = bool(await self.context.send_message(session, chain))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 告警发送失败不中断监控
+            self._logger.warning("登录状态告警发送失败（session=%s）: %s", session, exc)
+            return False
+        if ok:
+            self._logger.info("登录状态告警已发送至 %s", session)
+        else:
+            self._logger.warning("登录状态告警发送失败（session=%s 不可达）", session)
+        return ok
+
+    def login_status(self) -> dict[str, Any]:
+        """返回登录校验状态（供 WebUI ``/api/login-status`` 展示）。
+
+        Returns:
+            ``{"last_ok_at", "consecutive_failures", "last_error"}``。
+        """
+        return {
+            "last_ok_at": self._login_last_ok_at,
+            "consecutive_failures": self._login_consecutive_failures,
+            "last_error": self._login_last_error,
+        }
 
     def current_subscriptions(self) -> list[Subscription]:
         """返回调度器当前订阅快照（热重建后保持最新）。
@@ -1001,7 +1142,7 @@ class PluginLifecycle:
         停 scheduler（3 轮询任务 + 维护任务）→ WebUI 释放端口 → 关库。
         """
         self._closing = True
-        login_task, self._login_check_task = self._login_check_task, None
+        login_task, self._login_monitor_task = self._login_monitor_task, None
         if login_task is not None and not login_task.done():
             login_task.cancel()
             await asyncio.gather(login_task, return_exceptions=True)
@@ -1023,7 +1164,7 @@ class PluginLifecycle:
             return dict(config)
         return {
             key: getattr(config, key, {})
-            for key in ("credential", "poll", "webui", "subscriptions")
+            for key in ("credential", "poll", "webui", "login_monitor", "subscriptions")
         }
 
     def _webui_config(self) -> dict[str, Any]:
@@ -1053,6 +1194,7 @@ class PluginLifecycle:
             request_rebuild=self.reloader.request_rebuild,
             status_provider=lambda: self.scheduler.status,
             config_status_provider=self.reloader.config_status,
+            login_status_provider=self.login_status,
             logger=self._logger,
             save_config=lambda cfg: self.config.save_config_async(cfg),
             config_lock=self.reloader.lock,

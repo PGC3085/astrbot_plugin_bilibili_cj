@@ -25,6 +25,7 @@ var SUB_TYPE_TO_EVENT = { live: 'live_on', dynamic: 'dynamic', collection: 'coll
 var POLL_DEFAULT_SEC = 300;
 var STATUS_REFRESH_MS = 10000;
 var LOG_REFRESH_MS = 5000;
+var LOGIN_REFRESH_MS = 30000;
 var LOG_TAIL = 200;
 
 /* ---------- 状态 ---------- */
@@ -39,6 +40,7 @@ var state = {
   editingIndex: null,    /* state.subs 下标；null = 新增 */
   statusTimer: null,
   logTimer: null,
+  loginTimer: null,
   logAutoScroll: true,
 };
 
@@ -57,14 +59,16 @@ function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
-/* ISO 时间 -> 本地 "YYYY-MM-DD HH:MM:SS"；空/非法 -> "—" */
+/* ISO 时间 -> UTC+8 "YYYY-MM-DD HH:MM:SS"；空/非法 -> "—" */
 function fmtTime(iso) {
   if (!iso) return '—';
   var d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
+  // 统一按 UTC+8（中国标准时间）展示，与后端推送事件时间一致
+  var cst = new Date(d.getTime() + 8 * 3600 * 1000);
   function p(n) { return String(n).padStart(2, '0'); }
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
-    ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  return cst.getUTCFullYear() + '-' + p(cst.getUTCMonth() + 1) + '-' + p(cst.getUTCDate()) +
+    ' ' + p(cst.getUTCHours()) + ':' + p(cst.getUTCMinutes()) + ':' + p(cst.getUTCSeconds());
 }
 
 /* 数字输入读取：空 -> fallback；非法 -> {value:null, err} */
@@ -673,52 +677,79 @@ function renderConfigStatus(data) {
   }
 }
 
-function subNameById(id) {
-  for (var i = 0; i < state.subs.length; i++) {
-    if (state.subs[i].id === id) return state.subs[i].name;
+/* ---------- 顶栏登录状态 ---------- */
+
+function refreshLoginStatus() {
+  api('/api/login-status').then(renderLoginStatus).catch(function () {
+    /* 401 已回令牌门；网络错误保留上次渲染 */
+  });
+}
+
+function renderLoginStatus(data) {
+  var el = $('#login-status');
+  if (!el || !data) return;
+  if (data.last_ok_at) {
+    el.textContent = '登录校验通过：' + fmtTime(data.last_ok_at);
+    el.className = 'login-status ok';
+  } else if (data.consecutive_failures) {
+    el.textContent = '登录校验失败 ×' + data.consecutive_failures;
+    el.className = 'login-status err';
+  } else {
+    el.textContent = '登录校验：—';
+    el.className = 'login-status';
   }
-  return null;
 }
 
 function renderStatus() {
   var grid = $('#status-grid');
-  var ids = Object.keys(state.status);
+  var subs = Array.isArray(state.subs) ? state.subs : [];
 
   var liveNow = 0;
   var errorSubs = 0;
-  var disabled = 0;
-  ids.forEach(function (id) {
-    var st = state.status[id];
-    if (st.live_status === 1) liveNow++;
-    if (st.error_count) errorSubs++;
-    if (st.auto_disabled) disabled++;
+  var autoDisabled = 0;
+  var stopped = 0;
+  subs.forEach(function (sub) {
+    var st = state.status[sub.id];
+    if (sub.enabled === false) stopped++;
+    if (st && st.live_status === 1) liveNow++;
+    if (st && st.error_count) errorSubs++;
+    if (st && st.auto_disabled) autoDisabled++;
   });
-  $('#status-meta').textContent = ids.length
-    ? ('共 ' + ids.length + ' 条 · 直播中 ' + liveNow + ' · 异常 ' + errorSubs + ' · 自动禁用 ' + disabled)
-    : '';
 
-  if (!ids.length) {
-    grid.innerHTML = '<div class="empty">暂无状态数据（调度器未运行或还没有订阅）。</div>';
+  var meta = '共 ' + subs.length + ' 条 · 直播中 ' + liveNow + ' · 异常 ' + errorSubs +
+    ' · 自动禁用 ' + autoDisabled;
+  if (stopped) meta += ' · 已停用 ' + stopped;
+  $('#status-meta').textContent = subs.length ? meta : '';
+
+  if (!subs.length) {
+    grid.innerHTML = '<div class="empty">暂无状态数据（还没有订阅）。</div>';
     return;
   }
 
-  grid.innerHTML = ids.map(function (id) {
-    var st = state.status[id];
-    var name = subNameById(id) || (id.length > 12 ? id.slice(0, 12) + '…' : id);
+  grid.innerHTML = subs.map(function (sub) {
+    var id = sub.id || '';
+    var st = state.status[id] || null;
+    var name = sub.name || (id.length > 12 ? id.slice(0, 12) + '…' : id) || '未命名';
     var badges = '';
-    if (st.auto_disabled) badges += '<span class="badge badge-amber">自动禁用</span>';
-    if (st.live_status === 1) badges += '<span class="badge badge-green">直播中</span>';
-    else if (st.live_status === 2) badges += '<span class="badge badge-blue">轮播中</span>';
-    else if (st.live_status === 0) badges += '<span class="badge badge-muted">未开播</span>';
+    if (sub.enabled === false) {
+      badges += '<span class="badge badge-muted">已停用</span>';
+    } else if (!st) {
+      badges += '<span class="badge badge-muted">未轮询</span>';
+    } else {
+      if (st.auto_disabled) badges += '<span class="badge badge-amber">自动禁用</span>';
+      if (st.live_status === 1) badges += '<span class="badge badge-green">直播中</span>';
+      else if (st.live_status === 2) badges += '<span class="badge badge-blue">轮播中</span>';
+      else if (st.live_status === 0) badges += '<span class="badge badge-muted">未开播</span>';
+    }
 
     return '<div class="status-card">' +
       '<div class="sc-head"><span class="sc-name" title="' + esc(name) + '">' + esc(name) + '</span>' + badges + '</div>' +
       '<div class="sc-grid">' +
-        '<div class="sc-item"><span class="sc-label">上次轮询</span><span class="sc-value">' + esc(fmtTime(st.last_poll)) + '</span></div>' +
-        '<div class="sc-item"><span class="sc-label">错误次数</span><span class="sc-value' + (st.error_count ? ' v-err' : '') + '">' + esc(st.error_count) + '</span></div>' +
-        '<div class="sc-item"><span class="sc-label">上次推送</span><span class="sc-value">' + esc(fmtTime(st.last_push_at)) + '</span></div>' +
+        '<div class="sc-item"><span class="sc-label">上次轮询</span><span class="sc-value">' + esc(st ? fmtTime(st.last_poll) : '—') + '</span></div>' +
+        '<div class="sc-item"><span class="sc-label">错误次数</span><span class="sc-value' + (st && st.error_count ? ' v-err' : '') + '">' + esc(st ? st.error_count : '—') + '</span></div>' +
+        '<div class="sc-item"><span class="sc-label">上次推送</span><span class="sc-value">' + esc(st ? fmtTime(st.last_push_at) : '—') + '</span></div>' +
       '</div>' +
-      (st.last_error
+      (st && st.last_error
         ? '<div class="sc-error" title="' + esc(st.last_error) + '">' + esc(st.last_error) + '</div>'
         : '') +
       '<div class="sc-id">' + esc(id) + '</div>' +
@@ -756,6 +787,9 @@ function startTimers() {
   if (!state.logTimer) {
     state.logTimer = setInterval(refreshLogs, LOG_REFRESH_MS);
   }
+  if (!state.loginTimer) {
+    state.loginTimer = setInterval(refreshLoginStatus, LOGIN_REFRESH_MS);
+  }
 }
 
 function stopTimers() {
@@ -766,6 +800,10 @@ function stopTimers() {
   if (state.logTimer) {
     clearInterval(state.logTimer);
     state.logTimer = null;
+  }
+  if (state.loginTimer) {
+    clearInterval(state.loginTimer);
+    state.loginTimer = null;
   }
 }
 
@@ -798,6 +836,7 @@ function submitToken() {
 
 function boot() {
   startTimers();
+  refreshLoginStatus();
   switchTab('subs');
   Promise.all([loadSubs(), ensureSettings()]).catch(function (err) {
     if (err.status !== 401) setConn(false, '连接失败');

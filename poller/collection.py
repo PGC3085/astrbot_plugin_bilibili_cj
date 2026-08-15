@@ -80,8 +80,8 @@ class CollectionPoller:
         retry_counts: main.py 持有的重试计数 dict（``{sub_id: {bvid: n}}``），
             跨 poller 重建保留；``initialize()`` 清空即重启后重新计数。
         logger: 显式 logger；缺省用插件统一 logger。
-        acquire: 每次 B 站请求前调用的异步取牌函数（调度器注入令牌桶）；
-            缺省为无操作，行为不变。
+        acquire: 每轮轮询开始前调用的异步取牌函数（调度器注入令牌桶，
+            per-poll 限速）；缺省为无操作，行为不变。
     """
 
     def __init__(
@@ -115,9 +115,11 @@ class CollectionPoller:
     async def poll(self) -> None:
         """执行一轮合集扫描；仓库/未知异常吞掉记日志，不向上抛出。
 
+        轮询开始前取一枚令牌（per-poll 限速：每轮只取一枚，轮内分页请求不限速）。
         ``asyncio.CancelledError`` 透传（任务取消属正常 shutdown 路径）。
         """
         try:
+            await self._acquire()
             await self._poll_once()
         except asyncio.CancelledError:
             raise
@@ -161,7 +163,6 @@ class CollectionPoller:
         pages: list[tuple[str, list[dict[str, Any]]]] = []
         pn = 1
         while True:
-            await self._acquire()
             resp = await self.repo.get_videos(
                 sub.uid, sub.list_id, sub.series_type, pn, _PAGE_SIZE
             )

@@ -16,6 +16,8 @@
   - ``GET /api/status``：调度器 status dict（SimpleNamespace 各字段转 JSON）。
   - ``GET /api/config-status``：配置文件健康状态（``path/ok/last_error``），
     供 WebUI 展示配置读取失败原因，避免控制台日志刷屏。
+  - ``GET /api/login-status``：B 站登录校验状态（``last_ok_at/consecutive_failures/
+    last_error``），供 WebUI 顶栏展示最近登录校验通过时间。
   - ``GET/POST /api/settings``：credential/poll/webui 分组读写；webui.host/port/
     enabled 变更仅插件重载后生效（README 注明），此处仅持久化。
   - ``POST /api/test-push``：``{session, message}`` 单会话试推，或
@@ -172,6 +174,7 @@ class WebUIServer:
         build_chain: Callable[[str, dict[str, Any]], Any] | None = None,
         send_to: Callable[[str, Any], Awaitable[bool]] | None = None,
         config_status_provider: Callable[[], dict[str, Any]] | None = None,
+        login_status_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._config = config
         self._request_rebuild = request_rebuild
@@ -187,6 +190,11 @@ class WebUIServer:
             config_status_provider
             if config_status_provider is not None
             else self._default_config_status
+        )
+        self._login_status_provider = (
+            login_status_provider
+            if login_status_provider is not None
+            else self._default_login_status
         )
         self._token = token or str(self._webui_config().get("token", "") or "")
         self._static_root = Path(__file__).resolve().parent
@@ -218,6 +226,7 @@ class WebUIServer:
         )
         self._app.router.add_get("/api/status", self._api_status_get)
         self._app.router.add_get("/api/config-status", self._api_config_status_get)
+        self._app.router.add_get("/api/login-status", self._api_login_status_get)
         self._app.router.add_get("/api/settings", self._api_settings_get)
         self._app.router.add_post("/api/settings", self._api_settings_post)
         self._app.router.add_post("/api/test-push", self._api_test_push_post)
@@ -513,6 +522,16 @@ class WebUIServer:
     def _default_config_status() -> dict[str, Any]:
         """未注入 config_status_provider 时的缺省健康状态（视为正常）。"""
         return {"path": "", "ok": True, "last_error": None}
+
+    async def _api_login_status_get(self, request: web.Request) -> web.Response:
+        """GET /api/login-status：返回 B 站登录校验状态（供顶栏展示）。"""
+        del request
+        return web.json_response(self._login_status_provider())
+
+    @staticmethod
+    def _default_login_status() -> dict[str, Any]:
+        """未注入 login_status_provider 时的缺省登录状态。"""
+        return {"last_ok_at": None, "consecutive_failures": 0, "last_error": None}
 
     def _status_to_jsonable(self) -> dict[str, Any]:
         """把 status dict 转为可 JSON 序列化的 dict（按 sub_id）。"""

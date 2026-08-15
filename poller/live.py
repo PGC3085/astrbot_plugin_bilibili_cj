@@ -84,8 +84,8 @@ class LivePoller:
         context: AstrBot Context（或 fake）。
         push_title_change: 标题变化时是否推送"改标题"。
         now: 时钟注入（可调用），测试用可控时钟。
-        acquire: 每次 B 站请求前调用的异步取牌函数（调度器注入令牌桶）；
-            缺省为无操作，行为不变。
+        acquire: 每轮轮询开始前调用的异步取牌函数（调度器注入令牌桶，
+            per-poll 限速）；缺省为无操作，行为不变。
     """
 
     def __init__(
@@ -122,9 +122,11 @@ class LivePoller:
     async def poll(self) -> bool:
         """执行一轮直播轮询；返回本轮是否投递了推送。
 
+        轮询开始前取一枚令牌（per-poll 限速：每轮只取一枚，轮内请求不限速）。
         ``asyncio.CancelledError`` 透传；仓库/未知异常吞掉记日志并计数。
         """
         try:
+            await self._acquire()
             return await self._poll_once()
         except asyncio.CancelledError:
             raise
@@ -386,7 +388,6 @@ class LivePoller:
     # -- 仓库 / 数据层 -----------------------------------------------------
 
     async def _resolve_room_id(self, uid: int) -> int:
-        await self._acquire()
         info = await self.repo.get_live_info(uid)
         try:
             return int(info["live_room"]["roomid"])
@@ -394,7 +395,6 @@ class LivePoller:
             return 0
 
     async def _fetch_room(self, room_id: int) -> dict[str, Any]:
-        await self._acquire()
         info = await self.repo.get_room_info(room_id)
         if isinstance(info.get("room_info"), dict):  # SDK 嵌套 room_info 形状
             info = info["room_info"]

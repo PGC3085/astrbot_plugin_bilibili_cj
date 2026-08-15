@@ -1144,3 +1144,56 @@ def test_config_status_endpoint_defaults_ok():
             await client.close()
 
     _run(_case())
+
+
+# ----------------------------------------------------------------------
+# 16. GET /api/login-status
+# ----------------------------------------------------------------------
+
+
+def test_login_status_endpoint_returns_provider():
+    """注入 provider 时原样返回登录校验状态。"""
+
+    async def _case():
+        server = WebUIServer(
+            _make_config(),
+            request_rebuild=lambda clear_disabled: "rebuilt",
+            status_provider=dict,
+            token="tok",
+            login_status_provider=lambda: {
+                "last_ok_at": "2026-08-14T12:00:00+00:00",
+                "consecutive_failures": 1,
+                "last_error": "expired",
+            },
+        )
+        client = await _start_client(server)
+        try:
+            resp = await client.get("/api/login-status", headers=_AUTH)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["last_ok_at"] == "2026-08-14T12:00:00+00:00"
+            assert body["consecutive_failures"] == 1
+            assert body["last_error"] == "expired"
+        finally:
+            await client.close()
+
+    _run(_case())
+
+
+def test_login_status_endpoint_defaults():
+    """未注入 provider 时返回默认登录状态。"""
+
+    async def _case():
+        server = _make_server()
+        client = await _start_client(server)
+        try:
+            resp = await client.get("/api/login-status", headers=_AUTH)
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["last_ok_at"] is None
+            assert body["consecutive_failures"] == 0
+            assert body["last_error"] is None
+        finally:
+            await client.close()
+
+    _run(_case())

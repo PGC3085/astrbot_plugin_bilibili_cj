@@ -62,6 +62,7 @@ _TEMPLATES: dict[str, str] = {
     "live_title": "【B站改标题】{name}\n旧标题：{old_title}\n新标题：{new_title}\n时间：{event_time}\n链接：{url}",
     "dynamic": "【B站动态】{name}\n{type_text}\n{content}\n时间：{event_time}\n链接：{url}",
     "collection": "【B站合集更新】{name}\n视频：{video_title}\n合集：{list_name}\n发布时间：{publish_time}\n链接：{url}",
+    "alert": "【B站监控告警】{content}",
 }
 
 _logger: Any = None
@@ -219,8 +220,9 @@ async def send(
 
     Each session is validated with :func:`validate_session` first; invalid
     sessions are skipped, logged, and recorded as ``False`` without raising.
-    Per-session failures (send exception, platform not found) never propagate
-    out of this function — they are logged and reflected in the result map.
+    Every per-session outcome is logged (info on success, warning on failure),
+    and failures (send exception, platform not found) never propagate out of
+    this function — they are logged and reflected in the result map.
 
     Status bookkeeping (``status`` maps ``sub_id`` to a mutable object):
     - Any session success sets ``last_push_at`` to the current UTC ISO-8601
@@ -252,18 +254,32 @@ async def send(
             if last_error is None:
                 last_error = f"非法会话 {session}: {exc}"
             continue
+        send_error: Exception | None = None
         try:
             ok = bool(await context.send_message(session, chain))
         except Exception as exc:  # noqa: BLE001 - 单会话失败不中断其余会话
-            _get_logger().warning("推送至会话 %s 失败: %s", session, exc)
             ok = False
-            if last_error is None:
-                last_error = f"会话 {session} 发送异常: {exc}"
+            send_error = exc
         results[session] = ok
         if ok:
+            _get_logger().info(
+                "推送成功 → 会话 %s（订阅：%s）", session, subscription.name
+            )
             any_success = True
-        elif last_error is None:
-            last_error = f"会话 {session} 发送失败或平台未找到"
+        else:
+            reason = (
+                f"异常: {send_error}"
+                if send_error is not None
+                else "平台未找到或目标不可达"
+            )
+            _get_logger().warning(
+                "推送失败 → 会话 %s（订阅：%s）: %s",
+                session,
+                subscription.name,
+                reason,
+            )
+            if last_error is None:
+                last_error = f"会话 {session} 发送失败: {reason}"
     if any_success:
         entry = _ensure_status(status, subscription.id)
         entry.last_push_at = _now_iso()

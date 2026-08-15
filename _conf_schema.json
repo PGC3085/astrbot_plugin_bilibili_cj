@@ -98,6 +98,37 @@
             }
         }
     },
+    "login_monitor": {
+        "description": "登录状态监控",
+        "type": "object",
+        "hint": "周期性校验 B 站登录状态；连续失败达阈值时向指定会话发送告警通知。",
+        "items": {
+            "enabled": {
+                "description": "启用登录状态监控",
+                "type": "bool",
+                "default": true,
+                "hint": "是否周期性校验 B 站登录状态"
+            },
+            "interval_sec": {
+                "description": "校验间隔（秒）",
+                "type": "int",
+                "default": 3600,
+                "hint": "两次登录状态校验的间隔，最小 60 秒"
+            },
+            "fail_threshold": {
+                "description": "失败通知阈值（次）",
+                "type": "int",
+                "default": 3,
+                "hint": "连续校验失败达到该次数后，向 notify_session 发送告警；最小 1"
+            },
+            "notify_session": {
+                "description": "告警通知会话",
+                "type": "string",
+                "default": "",
+                "hint": "登录连续失败告警的目标会话（platform:message_type:session_id，通过 /sid 获取）；留空仅记日志不发送"
+            }
+        }
+    },
     "subscriptions": {
         "description": "订阅列表",
         "type": "list",

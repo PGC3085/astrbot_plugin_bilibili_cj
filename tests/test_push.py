@@ -1,14 +1,19 @@
 """推送模板 / 时间格式化单元测试。
 
-离线测试（无 AstrBot 运行时）验证三类推送模板均携带详细事件时间，以及
-``format_event_time`` 对 epoch 时间戳的格式化与非法值兜底。
+离线测试（无 AstrBot 运行时）验证三类推送模板均携带详细事件时间，
+``format_event_time`` 对 epoch 时间戳的格式化与非法值兜底，以及
+``push.send`` 逐会话记录推送结果日志。
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from push import format_event_time, text_for
+from config import Subscription
+from push import format_event_time, send, text_for
 
 #: 与 push._EVENT_TZ 保持一致的测试时区（UTC+8）。
 _TZ = timezone(timedelta(hours=8))
@@ -87,3 +92,68 @@ def test_collection_template_renders_publish_time() -> None:
     )
     assert "【B站合集更新】" in text
     assert "发布时间：2023-11-14 22:13:20" in text
+
+
+def test_send_logs_per_session_results() -> None:
+    """``push.send`` 逐会话记录推送结果日志（成功 info / 失败 warning）。"""
+
+    class _RecordHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_message(self, session: str, chain: Any) -> bool:
+            del chain
+            self.sent.append(session)
+            return session.endswith(":ok")
+
+    async def scenario() -> None:
+        handler = _RecordHandler()
+        logger = logging.getLogger("push")
+        logger.handlers.clear()
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        try:
+            sub = Subscription(
+                id="s1",
+                type="live",
+                name="测试订阅",
+                uid=1,
+                push_session_ids=[
+                    "aiocqhttp:GroupMessage:ok",
+                    "aiocqhttp:GroupMessage:fail",
+                ],
+            )
+            ctx = _Ctx()
+            results = await send(sub, "测试链", ctx, {})
+            assert results == {
+                "aiocqhttp:GroupMessage:ok": True,
+                "aiocqhttp:GroupMessage:fail": False,
+            }
+            assert ctx.sent == [
+                "aiocqhttp:GroupMessage:ok",
+                "aiocqhttp:GroupMessage:fail",
+            ]
+            infos = [
+                r.getMessage() for r in handler.records if r.levelno == logging.INFO
+            ]
+            warns = [
+                r.getMessage() for r in handler.records if r.levelno == logging.WARNING
+            ]
+            assert any(
+                "推送成功" in m and "aiocqhttp:GroupMessage:ok" in m for m in infos
+            )
+            assert any(
+                "推送失败" in m and "aiocqhttp:GroupMessage:fail" in m for m in warns
+            )
+        finally:
+            logger.removeHandler(handler)
+
+    asyncio.run(scenario())

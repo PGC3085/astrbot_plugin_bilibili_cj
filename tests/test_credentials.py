@@ -5,8 +5,8 @@
 1. ``PluginLifecycle._log_credential_status``：sessdata 缺失 → 匿名告警；
    有 sessdata 但缺 bili_jct/dedeuserid → 不完整告警；完整 → 无告警。
    buvid3/buvid4/ac_time_value 为可选，缺失不产生告警。
-2. ``PluginLifecycle._log_login_status``：后台登录校验成功/失败分别记录
-   info/warning，scheduler 不支持时静默跳过。
+2. ``PluginLifecycle._check_login_once``：登录校验成功/失败分别记录 info/warning
+   并更新监控状态；连续失败达阈值时向 notify_session 发送告警。
 3. ``Scheduler.check_login``：委托 repository 的 ``check_login``；repository
    不支持时返回 None。
 """
@@ -144,7 +144,7 @@ def test_optional_credential_fields_not_warned() -> None:
 
 
 # --------------------------------------------------------------------------
-# 2. _log_login_status
+# 2. _check_login_once / 连续失败告警
 # --------------------------------------------------------------------------
 
 
@@ -154,22 +154,28 @@ def test_login_status_success_logs_username() -> None:
         scheduler = _SchedulerWithLogin({"uname": "测试用户", "mid": 123})
         lifecycle = _make_lifecycle({"sessdata": "a"}, scheduler, logger)
 
-        await lifecycle._log_login_status()
+        ok = await lifecycle._check_login_once()
 
+        assert ok is True
+        assert lifecycle._login_last_ok_at is not None
+        assert lifecycle._login_consecutive_failures == 0
         infos = [r.getMessage() for r in handler.records if r.levelno == logging.INFO]
         assert any("登录校验通过" in m and "测试用户" in m for m in infos)
 
     asyncio.run(scenario())
 
 
-def test_login_status_failure_logs_warning() -> None:
+def test_login_status_failure_increments_and_warns() -> None:
     async def scenario() -> None:
         logger, handler = _make_logger("test_credentials.login_fail")
         scheduler = _SchedulerWithLogin(error=RuntimeError("cookie expired"))
         lifecycle = _make_lifecycle({"sessdata": "a"}, scheduler, logger)
 
-        await lifecycle._log_login_status()
+        ok = await lifecycle._check_login_once()
 
+        assert ok is False
+        assert lifecycle._login_consecutive_failures == 1
+        assert lifecycle._login_last_error == "cookie expired"
         warnings_ = [
             r.getMessage() for r in handler.records if r.levelno == logging.WARNING
         ]
@@ -183,11 +189,83 @@ def test_login_status_skips_when_scheduler_unsupported() -> None:
         logger, handler = _make_logger("test_credentials.login_skip")
         lifecycle = _make_lifecycle({"sessdata": "a"}, object(), logger)
 
-        await lifecycle._log_login_status()
+        ok = await lifecycle._check_login_once()
 
+        assert ok is True
         assert handler.records == []
 
     asyncio.run(scenario())
+
+
+class _FakeContext:
+    """记录 send_message 调用的假 context。"""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, Any]] = []
+
+    async def send_message(self, session: str, chain: Any) -> bool:
+        self.sent.append((session, chain))
+        return True
+
+
+def _make_monitor_lifecycle(
+    scheduler: Any, context: Any, login_cfg: dict[str, Any], logger: logging.Logger
+) -> PluginLifecycle:
+    """构造带 login_monitor 配置的最小 PluginLifecycle。"""
+    return PluginLifecycle(
+        config={"login_monitor": login_cfg},
+        context=context,
+        credential_cfg={"sessdata": "a"},
+        db=None,
+        scheduler=scheduler,
+        reloader=None,
+        logger=logger,
+        webui=None,
+    )
+
+
+def test_login_monitor_notifies_after_threshold() -> None:
+    """连续失败达阈值时向 notify_session 发送一次告警。"""
+
+    async def scenario() -> None:
+        logger, _handler = _make_logger("test_credentials.notify")
+        scheduler = _SchedulerWithLogin(error=RuntimeError("expired"))
+        context = _FakeContext()
+        lifecycle = _make_monitor_lifecycle(
+            scheduler,
+            context,
+            {
+                "enabled": True,
+                "interval_sec": 60,
+                "fail_threshold": 2,
+                "notify_session": "aiocqhttp:GroupMessage:1",
+            },
+            logger,
+        )
+
+        assert await lifecycle._check_login_once() is False
+        assert context.sent == []  # 第 1 次失败未达阈值，不通知
+
+        assert await lifecycle._check_login_once() is False
+        assert len(context.sent) == 1  # 第 2 次失败达阈值，通知一次
+        session, chain = context.sent[0]
+        assert session == "aiocqhttp:GroupMessage:1"
+        assert "连续 2 次校验失败" in str(chain)
+
+        assert await lifecycle._check_login_once() is False
+        assert len(context.sent) == 1  # 第 3 次失败不再重复通知
+
+    asyncio.run(scenario())
+
+
+def test_login_monitor_defaults_when_absent() -> None:
+    """未配置 login_monitor 时使用默认值。"""
+    lifecycle = _make_lifecycle(
+        {"sessdata": "a"}, object(), logging.getLogger("test_credentials.defaults")
+    )
+    assert lifecycle._login_monitor_enabled() is True
+    assert lifecycle._login_monitor_interval() == 3600
+    assert lifecycle._login_monitor_threshold() == 3
 
 
 # --------------------------------------------------------------------------
