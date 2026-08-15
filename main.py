@@ -558,6 +558,13 @@ class ConfigReloader:
         if not isinstance(raw, dict):
             self._record_config_failure("顶层不是对象")
             return None
+        if "subscriptions" not in raw:
+            # 键缺失通常来自手改笔误（键拼错/误删）；若按空列表重建并持久化，
+            # 会把用户全部订阅与去重状态清空。拒绝重建、保留当前任务。
+            self._record_config_failure(
+                "缺少 subscriptions 键（疑似手改笔误），拒绝重建以防清空订阅"
+            )
+            return None
         try:
             subs = normalize(raw)
         except Exception as exc:  # noqa: BLE001 - normalize 失败不应当中断重建
@@ -712,6 +719,14 @@ class ConfigReloader:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    def reset(self) -> None:
+        """复位关闭标志（terminate 后同一实例重新 initialize 时恢复热重载）。
+
+        ``shutdown()`` 置 ``_closing=True`` 后 ``request_rebuild`` 会永远返回
+        ``no-op``、watcher 一轮即退出——复用时必须先调用本方法复位。
+        """
+        self._closing = False
 
     def _stat_config(self) -> tuple[int, int] | None:
         """返回 (size, mtime_ns) 快照；stat 失败（文件不存在等）返回 None。
@@ -927,6 +942,9 @@ class PluginLifecycle:
                 self.webui.install_log_handler()
         self.scheduler.start()
         self._maintenance_task = self.scheduler.create_maintenance_task()
+        reset = getattr(self.reloader, "reset", None)
+        if callable(reset):
+            reset()  # 同一实例 terminate 后复用时恢复热重载能力（fake 无此方法）
         self._watcher_task = self.reloader.start_watcher()
         # /api/status 数据源：与 scheduler 共享同一个 dict（重建不清空）。
         self.status = self.scheduler.status

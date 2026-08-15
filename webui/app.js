@@ -38,6 +38,8 @@ var state = {
   status: {},
   activeTab: 'subs',
   editingIndex: null,    /* state.subs 下标；null = 新增 */
+  editingId: null,       /* 打开编辑器时快照的订阅 id（按 id 写回，防错位） */
+  editingToken: 0,       /* 编辑器代次（迟到的异步回调据此识别过期弹窗） */
   statusTimer: null,
   logTimer: null,
   loginTimer: null,
@@ -280,6 +282,10 @@ function deleteSubById(id, onOk, onErr) {
 function openSubEditor(index) {
   state.editingIndex = index;
   var s = index == null ? null : state.subs[index];
+  /* 打开时快照 id 与代次：保存/关闭回调据此判定目标，避免在途请求重排
+     表格后把编辑写到错误的订阅、或迟到的成功回调关闭新打开的编辑器 */
+  state.editingId = s ? (s.id || null) : null;
+  state.editingToken = (state.editingToken || 0) + 1;
   $('#sub-modal-title').textContent = s ? '编辑订阅' : '新增订阅';
   $('#f-id-line').classList.toggle('hidden', !s);
   $('#f-id').textContent = s ? s.id : '';
@@ -371,7 +377,8 @@ function onSubEditorSave() {
     return;
   }
 
-  /* wire 形态；新增行不带 id（后端分配），编辑行保留原 id */
+  /* wire 形态；新增行不带 id（后端分配），编辑行按打开时快照的 id 写回——
+     即使编辑期间表格因其他请求重排，也绝不会把编辑写到错误的订阅 */
   var wire = {
     type: $('#f-type').value,
     name: $('#f-name').value.trim(),
@@ -382,39 +389,32 @@ function onSubEditorSave() {
     enabled: $('#f-enabled').checked,
     push_session_ids: parsed.sessions,
   };
-
-  if (state.editingIndex != null) {
-    var old = state.subs[state.editingIndex];
-    if (old && old.id) wire.id = old.id;
-  }
+  if (state.editingId) wire.id = state.editingId;
   var btn = $('#f-save');
+  var token = state.editingToken;
   btn.disabled = true;
   btn.textContent = '保存中…';
   upsertSub(wire, function () {
     btn.disabled = false;
     btn.textContent = '保存';
+    if (token !== state.editingToken) return;  /* 用户已重开编辑器：不干扰新弹窗 */
     closeSubEditor();
     toast('订阅已保存', 'success');
   }, function (err) {
     btn.disabled = false;
     btn.textContent = '保存';
+    if (token !== state.editingToken) return;
     setModalErrors([(err.data && err.data.error) || err.message]);
   });
 }
 
-function deleteSub(index) {
-  var s = state.subs[index];
-  if (!s) return;
-  var label = s.name || s.id || ('#' + index);
-  if (!s.id) {
-    applySubs(state.subs.filter(function (_s, i) { return i !== index; }));
-    toast('已移除未保存条目', 'info');
-    return;
-  }
+/* 删除按点击时快照的 id 定位：确认框停留期间表格重排也不会删错订阅 */
+function removeSub(id, label) {
+  if (!id) return;
   if (!window.confirm('确定删除订阅「' + label + '」吗？该操作会立即写回后端。')) {
     return;
   }
-  deleteSubById(s.id, function () {
+  deleteSubById(id, function () {
     toast('订阅已删除', 'success');
   }, function (err) {
     toast('删除失败：' + ((err.data && err.data.error) || err.message), 'error');
@@ -425,10 +425,14 @@ function onSubRowClick(e) {
   var btn = e.target.closest('button');
   if (!btn) return;
   var i = Number(btn.dataset.i);
+  var s = state.subs[i];
+  if (!s) return;
+  var id = s.id || '';
+  var label = s.name || id || ('#' + i);
   if (btn.classList.contains('row-edit')) openSubEditor(i);
   else if (btn.classList.contains('row-test')) fillTestPush(i);
   else if (btn.classList.contains('row-test-all')) doTestPushAll(i);
-  else if (btn.classList.contains('row-del')) deleteSub(i);
+  else if (btn.classList.contains('row-del')) removeSub(id, label);
 }
 
 function onSubRowChange(e) {
@@ -441,7 +445,9 @@ function onSubRowChange(e) {
   upsertSub(wire, function () {
     toast((wire.enabled ? '已启用 ' : '已停用 ') + (s.name || ('#' + i)), 'success');
   }, function (err) {
-    cb.checked = s.enabled;  /* 失败回滚勾选 */
+    /* 失败回滚：按服务器状态整体重渲染（captured 节点可能已因在途
+       请求被替换出 DOM，直接改 cb 会失效） */
+    applySubs(state.subs);
     toast('保存失败：' + ((err.data && err.data.error) || err.message), 'error');
   });
 }

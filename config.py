@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -32,6 +33,10 @@ POLL_MIN_INTERVAL_MIN: int = 1
 
 POLL_JITTER_MIN: float = 0.0
 """``poll_jitter_sec`` 的下限，低于此值被钳制（避免负随机延迟）。"""
+
+POLL_SUB_INTERVAL_MIN: int = 1
+"""订阅 ``poll_interval_sec`` 的下限（秒）：0/负数/截断后为 0 均钳制到此值，
+NaN/inf 等非有限数值视为非法并跳过该订阅。"""
 
 _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "live": ("uid",),
@@ -169,23 +174,33 @@ def _clamp_poll_settings(config: dict[str, Any]) -> None:
     if not isinstance(poll, dict):
         return
     interval = poll.get("global_min_interval_sec")
-    if isinstance(interval, (int, float)) and interval < POLL_MIN_INTERVAL_MIN:
-        logger.warning(
-            "global_min_interval_sec=%s 低于下限 %s，已钳制为 %s",
-            interval,
-            POLL_MIN_INTERVAL_MIN,
-            POLL_MIN_INTERVAL_MIN,
-        )
-        poll["global_min_interval_sec"] = POLL_MIN_INTERVAL_MIN
+    if isinstance(interval, (int, float)) and not isinstance(interval, bool):
+        try:
+            interval_value = float(interval)
+        except (TypeError, ValueError, OverflowError):
+            interval_value = math.nan
+        if not math.isfinite(interval_value) or interval_value < POLL_MIN_INTERVAL_MIN:
+            logger.warning(
+                "global_min_interval_sec=%s 非法或低于下限 %s，已钳制为 %s",
+                interval,
+                POLL_MIN_INTERVAL_MIN,
+                POLL_MIN_INTERVAL_MIN,
+            )
+            poll["global_min_interval_sec"] = POLL_MIN_INTERVAL_MIN
     jitter = poll.get("poll_jitter_sec")
-    if isinstance(jitter, (int, float)) and jitter < POLL_JITTER_MIN:
-        logger.warning(
-            "poll_jitter_sec=%s 低于下限 %s，已钳制为 %s",
-            jitter,
-            POLL_JITTER_MIN,
-            POLL_JITTER_MIN,
-        )
-        poll["poll_jitter_sec"] = POLL_JITTER_MIN
+    if isinstance(jitter, (int, float)) and not isinstance(jitter, bool):
+        try:
+            jitter_value = float(jitter)
+        except (TypeError, ValueError, OverflowError):
+            jitter_value = math.nan
+        if not math.isfinite(jitter_value) or jitter_value < POLL_JITTER_MIN:
+            logger.warning(
+                "poll_jitter_sec=%s 非法或低于下限 %s，已钳制为 %s",
+                jitter,
+                POLL_JITTER_MIN,
+                POLL_JITTER_MIN,
+            )
+            poll["poll_jitter_sec"] = POLL_JITTER_MIN
 
 
 def _to_int_or_none(raw: Any) -> int | None:
@@ -317,7 +332,36 @@ def _normalize_subscription(raw: Any, index: int) -> Subscription | None:
             uid,
         )
         return None
-    poll_interval_sec = int(poll_interval)
+    try:
+        interval_value = float(poll_interval)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "订阅项 #%d（type=%s, uid=%s）的 poll_interval_sec 无法解析，已跳过",
+            index,
+            sub_type,
+            uid,
+        )
+        return None
+    if not math.isfinite(interval_value):
+        # NaN / inf：钳制无意义且会毒化调度（sleep(inf) 永久挂起），跳过该订阅
+        logger.warning(
+            "订阅项 #%d（type=%s, uid=%s）的 poll_interval_sec 非有限数值，已跳过",
+            index,
+            sub_type,
+            uid,
+        )
+        return None
+    if interval_value < POLL_SUB_INTERVAL_MIN:
+        logger.warning(
+            "订阅项 #%d（type=%s, uid=%s）的 poll_interval_sec=%s 低于下限 %s，已钳制",
+            index,
+            sub_type,
+            uid,
+            poll_interval,
+            POLL_SUB_INTERVAL_MIN,
+        )
+        interval_value = float(POLL_SUB_INTERVAL_MIN)
+    poll_interval_sec = int(interval_value)
 
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -407,6 +451,9 @@ def normalize(config: dict[str, Any]) -> list[Subscription]:
     """
     _clamp_poll_settings(config)
 
+    if "subscriptions" not in config:
+        logger.warning("配置缺少 subscriptions 键，按空列表处理（疑似手改笔误）")
+        return []
     raw_subs = _coerce_subscriptions(config.get("subscriptions"))
     if raw_subs is None:
         return []

@@ -399,9 +399,66 @@ def test_settings_roundtrip():
     _run(_case())
 
 
-# ----------------------------------------------------------------------
-# 6. POST /api/test-push
-# ----------------------------------------------------------------------
+def test_settings_post_validates_poll_and_webui():
+    """poll 数值非法（0/负数/非数字）与 webui 端口/主机非法 → 400，不落盘。"""
+
+    async def _case():
+        config = _make_config()
+        save_calls = []
+
+        async def save(_cfg):
+            save_calls.append(_cfg)
+
+        server = WebUIServer(
+            config,
+            request_rebuild=lambda clear_disabled: "rebuilt",
+            status_provider=dict,
+            token="tok",
+            save_config=save,
+        )
+        client = await _start_client(server)
+        try:
+            # 合法设置 → 200
+            resp = await client.post(
+                "/api/settings",
+                json={"poll": {"global_min_interval_sec": 120, "poll_jitter_sec": 5}},
+                headers=_AUTH,
+            )
+            assert resp.status == 200
+            # 非法轮询间隔 → 400
+            for bad in (0, -1, "abc"):
+                resp = await client.post(
+                    "/api/settings",
+                    json={"poll": {"global_min_interval_sec": bad}},
+                    headers=_AUTH,
+                )
+                assert resp.status == 400, f"interval={bad!r} 应被拒绝"
+            # 非法抖动 → 400
+            resp = await client.post(
+                "/api/settings",
+                json={"poll": {"poll_jitter_sec": -1}},
+                headers=_AUTH,
+            )
+            assert resp.status == 400
+            # 非法端口 / 主机 → 400
+            resp = await client.post(
+                "/api/settings", json={"webui": {"port": 99999}}, headers=_AUTH
+            )
+            assert resp.status == 400
+            resp = await client.post(
+                "/api/settings", json={"webui": {"port": "abc"}}, headers=_AUTH
+            )
+            assert resp.status == 400
+            resp = await client.post(
+                "/api/settings", json={"webui": {"host": ""}}, headers=_AUTH
+            )
+            assert resp.status == 400
+            # 非法请求只落盘了第一次合法请求
+            assert len(save_calls) == 1
+        finally:
+            await client.close()
+
+    _run(_case())
 
 
 def test_test_push_valid_and_invalid_session():

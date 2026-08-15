@@ -909,3 +909,55 @@ def test_config_status_recovers_after_success() -> None:
         assert reloader.config_status()["last_error"] is None
 
     asyncio.run(scenario())
+
+
+def test_shutdown_then_reset_restores_hot_reload() -> None:
+    """shutdown 后 reset()：request_rebuild 恢复可用（不再永远 no-op）。"""
+
+    async def scenario() -> None:
+        path = Path(__file__).parent / "tmp_reset.json"
+        scheduler = FakeScheduler()
+        reloader, sleep = _make_reloader(path, scheduler)
+        _write_config(path, [_sub_dict("a", "live", 1)])
+        assert await _rebuild_once(reloader, sleep) == "rebuilt"
+
+        await reloader.shutdown()
+        assert await reloader.request_rebuild() == "no-op"  # 关闭后拒绝重建
+
+        reloader.reset()
+        _write_config(path, [_sub_dict("a", "live", 1), _sub_dict("b", "dynamic", 2)])
+        assert await _rebuild_once(reloader, sleep) == "rebuilt"
+        assert len(scheduler.rebuild_calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_missing_subscriptions_key_rejected_not_wiped() -> None:
+    """配置文件缺 subscriptions 键（手改笔误）→ 重建被拒，绝不清空订阅。"""
+
+    async def scenario() -> None:
+        path = Path(__file__).parent / "tmp_nosubs.json"
+        scheduler = FakeScheduler()
+        reloader, sleep = _make_reloader(path, scheduler)
+        _write_config(path, [_sub_dict("a", "live", 1)])
+        assert await _rebuild_once(reloader, sleep) == "rebuilt"
+
+        # 模拟手改笔误：删掉 subscriptions 键
+        path.write_text(
+            json.dumps(
+                {
+                    "credential": {},
+                    "poll": {"global_min_interval_sec": 60, "poll_jitter_sec": 0},
+                    "webui": {},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        assert await _rebuild_once(reloader, sleep) == "parse-failed"
+        assert len(scheduler.rebuild_calls) == 1  # 未触发第二次重建（订阅未被清空）
+        status = reloader.config_status()
+        assert status["ok"] is False
+        assert "subscriptions" in status["last_error"]
+
+    asyncio.run(scenario())

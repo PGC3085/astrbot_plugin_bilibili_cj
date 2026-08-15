@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import Any
 
 try:
@@ -115,12 +116,14 @@ class CollectionPoller:
         )
         self.push_cover = push_cover
         self._logger = logger if logger is not None else _get_logger()
+        self.error_count = 0
 
     async def poll(self) -> None:
-        """执行一轮合集扫描；仓库/未知异常吞掉记日志，不向上抛出。
+        """执行一轮合集扫描；仓库/未知异常记录错误状态后吞掉，不向上抛出。
 
         轮询开始前取一枚令牌（per-poll 限速：每轮只取一枚，轮内分页请求不限速）。
-        ``asyncio.CancelledError`` 透传（任务取消属正常 shutdown 路径）。
+        失败会写 ``status.last_error`` 并递增 ``error_count``（调度器据此退避
+        与自动禁用）。``asyncio.CancelledError`` 透传（任务取消属正常 shutdown）。
         """
         try:
             await self._acquire()
@@ -128,6 +131,7 @@ class CollectionPoller:
         except asyncio.CancelledError:
             raise
         except BiliError as exc:
+            self._record_error(exc, "合集轮询")
             self._logger.warning(
                 "合集轮询失败（sub=%s, list_id=%s）: %s",
                 self.subscription.name,
@@ -135,12 +139,26 @@ class CollectionPoller:
                 exc,
             )
         except Exception as exc:  # noqa: BLE001 - 轮询任务不允许未捕获异常
+            self._record_error(exc, "合集轮询")
             self._logger.error(
                 "合集轮询异常（sub=%s）: %s",
                 self.subscription.name,
                 exc,
                 exc_info=True,
             )
+
+    def _record_error(self, exc: Exception, where: str) -> None:
+        """记录轮询错误：写 ``status[sub_id].last_error`` 并递增 ``error_count``。
+
+        与 LivePoller 同款信号：调度器据此累计连续失败、指数退避并自动禁用；
+        缺失修复前合集错误对调度器完全不可见。
+        """
+        self.error_count += 1
+        entry = self.status.get(self.subscription.id)
+        if entry is None:
+            entry = SimpleNamespace(last_push_at=None, last_error=None)
+            self.status[self.subscription.id] = entry
+        entry.last_error = f"{where}: {exc}"
 
     async def _poll_once(self) -> None:
         sub = self.subscription

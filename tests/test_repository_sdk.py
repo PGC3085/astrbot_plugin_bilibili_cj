@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-from repository import BiliAuthError, BiliError, SdkRepository
+from repository import BiliApiError, BiliAuthError, BiliError, SdkRepository
 from repository import bili as bili_module
 
 
@@ -72,3 +72,32 @@ def test_call_sdk_maps_buvid_exceptions_to_auth_error() -> None:
             assert "buvid3/buvid4" in str(exc_info.value)
 
     asyncio.run(scenario())
+
+
+def test_call_sdk_maps_generic_api_exception_to_api_error() -> None:
+    """未分类的 SDK ApiException（ArgsException 等）兜底映射为 BiliApiError。"""
+
+    class _FakeSdkRepo(SdkRepository):
+        def __init__(self) -> None:
+            self._credential_cfg: dict[str, Any] = {}
+            self._credential = None
+
+    async def scenario() -> None:
+        repo = _FakeSdkRepo()
+
+        async def raise_it() -> dict[str, Any]:
+            raise bili_module.ApiException("参数非法")
+
+        with pytest.raises(BiliApiError) as exc_info:
+            await repo._call_sdk(raise_it)
+        assert "参数非法" in str(exc_info.value)
+
+    asyncio.run(scenario())
+
+
+def test_map_response_error_uses_message_attr() -> None:
+    """_map_response_error 经 getattr 取 msg/message，兼容不同 SDK 属性名。"""
+    exc = bili_module.ResponseCodeException(code=123, msg="boom")
+    mapped = SdkRepository._map_response_error(exc)
+    assert isinstance(mapped, BiliApiError)
+    assert "boom" in str(mapped)

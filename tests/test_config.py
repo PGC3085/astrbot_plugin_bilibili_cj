@@ -420,6 +420,54 @@ def test_poll_keeps_in_range_values_unchanged() -> None:
     assert cfg["poll"]["poll_jitter_sec"] == 15
 
 
+def test_sub_interval_negative_clamped_to_one() -> None:
+    """订阅 poll_interval_sec 为负数 → 钳制为 1（不再原样透传）。"""
+    cfg = _full_config()
+    cfg["subscriptions"] = [cfg["subscriptions"][0]]
+    cfg["subscriptions"][0]["poll_interval_sec"] = -5
+    subs = normalize(cfg)
+    assert len(subs) == 1
+    assert subs[0].poll_interval_sec == 1
+
+
+def test_sub_interval_zero_clamped_to_one() -> None:
+    """订阅 poll_interval_sec 为 0 → 钳制为 1。"""
+    cfg = _full_config()
+    cfg["subscriptions"] = [cfg["subscriptions"][0]]
+    cfg["subscriptions"][0]["poll_interval_sec"] = 0
+    subs = normalize(cfg)
+    assert len(subs) == 1
+    assert subs[0].poll_interval_sec == 1
+
+
+def test_sub_interval_fraction_truncated_but_not_below_one() -> None:
+    """小数间隔（如 0.5）截断后仍不小于 1，不产生忙循环。"""
+    cfg = _full_config()
+    cfg["subscriptions"] = [cfg["subscriptions"][0]]
+    cfg["subscriptions"][0]["poll_interval_sec"] = 0.5
+    subs = normalize(cfg)
+    assert len(subs) == 1
+    assert subs[0].poll_interval_sec == 1
+
+
+def test_sub_interval_non_finite_skipped() -> None:
+    """NaN/inf 间隔 → 订阅被跳过（不再让 normalize 抛异常毒化启动）。"""
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        cfg = _full_config()
+        cfg["subscriptions"] = [cfg["subscriptions"][0]]
+        cfg["subscriptions"][0]["poll_interval_sec"] = bad
+        assert normalize(cfg) == [], f"应跳过非有限间隔: {bad!r}"
+
+
+def test_poll_non_finite_min_interval_clamped() -> None:
+    """global_min_interval_sec 为 inf/nan → 钳制为 1（不再毒化令牌桶速率）。"""
+    for bad in (float("inf"), float("nan")):
+        cfg = _full_config()
+        cfg["poll"]["global_min_interval_sec"] = bad
+        normalize(cfg)
+        assert cfg["poll"]["global_min_interval_sec"] == 1
+
+
 # --------------------------------------------------------------------------
 # 6. 稳定 id
 # --------------------------------------------------------------------------

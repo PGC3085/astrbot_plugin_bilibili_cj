@@ -445,6 +445,29 @@ def test_repo_network_error_swallowed(tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_poll_error_signals_status_and_error_count(tmp_path) -> None:
+    """轮询失败会写 status.last_error 并递增 error_count（调度器退避/禁用信号）。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_page([_item(100, 8, title="A")])])
+        repo.error = BiliNetworkError("网络炸了")
+        poller, status = _make_poller(repo, db)
+        try:
+            await poller.poll()
+            assert poller.error_count == 1
+            assert status["sub-1"].last_error is not None
+            assert "网络炸了" in status["sub-1"].last_error
+            # 失败恢复后 error_count 不清零（由调度器在成功轮清零连续计数）
+            await poller.poll()
+            assert poller.error_count == 1
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_unexpected_repo_error_swallowed(tmp_path) -> None:
     """补充：非 Bili 异常同样吞掉记日志，不崩溃。"""
 

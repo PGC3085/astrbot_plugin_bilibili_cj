@@ -41,6 +41,7 @@ import asyncio
 import hmac
 import inspect
 import logging
+import math
 import time
 from collections import deque
 from pathlib import Path
@@ -391,8 +392,8 @@ class WebUIServer:
 
         校验经 config.normalize（保留/分配稳定 id）；被拒条目以
         ``{index, reason}`` 形式在 400 响应中标识（不静默 200，避免用户
-        提交的订阅凭空消失）。全部合法才落盘：配置写锁内
-        normalize+save_config，**释放锁后**调 ``request_rebuild(True)``。
+        提交的订阅凭空消失）。全部合法才落盘：**读取-规范化-写盘整体在配置
+        写锁内**（防并发整表保存互相覆盖），**释放锁后**调 ``request_rebuild(True)``。
         """
         data = await self._read_json_body(request)
         if data is None:
@@ -400,56 +401,45 @@ class WebUIServer:
         raw_subs = data.get("subscriptions")
         if not isinstance(raw_subs, list):
             return self._bad_request("subscriptions 必须为数组")
-        snapshot = self._config_snapshot()
-        snapshot["subscriptions"] = raw_subs
-        valid = normalize(snapshot)
-        if len(valid) != len(raw_subs):
-            rejected = [
-                {"index": index, "reason": reason}
-                for index, raw in enumerate(raw_subs)
-                if (reason := self._reject_reason(raw)) is not None
-            ]
-            errors = [f"订阅 #{item['index']}: {item['reason']}" for item in rejected]
-            self._logger.warning(
-                "WebUI 订阅整表保存被拒 %d/%d 条，整体拒绝未写入: %s",
-                len(rejected),
-                len(raw_subs),
-                errors,
-            )
-            return web.json_response(
-                {
-                    "ok": False,
-                    "error": "订阅列表含非法条目，整体拒绝（未写入）",
-                    "rejected": rejected,
-                    "errors": errors,
-                },
-                status=400,
-            )
         async with self._config_lock:
+            snapshot = self._config_snapshot()
+            snapshot["subscriptions"] = raw_subs
+            valid = normalize(snapshot)
+            if len(valid) != len(raw_subs):
+                rejected = [
+                    {"index": index, "reason": reason}
+                    for index, raw in enumerate(raw_subs)
+                    if (reason := self._reject_reason(raw)) is not None
+                ]
+                errors = [
+                    f"订阅 #{item['index']}: {item['reason']}" for item in rejected
+                ]
+                self._logger.warning(
+                    "WebUI 订阅整表保存被拒 %d/%d 条，整体拒绝未写入: %s",
+                    len(rejected),
+                    len(raw_subs),
+                    errors,
+                )
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": "订阅列表含非法条目，整体拒绝（未写入）",
+                        "rejected": rejected,
+                        "errors": errors,
+                    },
+                    status=400,
+                )
             self._config_set("subscriptions", [sub.to_dict() for sub in valid])
             await self._call_save_config()
         result = await self._rebuild(True)
         return web.json_response({"ok": True, "count": len(valid), "rebuild": result})
 
-    async def _commit_subscriptions(self, subs: list[Any]) -> str:
-        """锁内写回订阅列表并落盘，释放锁后触发重建，返回重建结果。
-
-        Args:
-            subs: 规范化后的订阅对象列表。
-
-        Returns:
-            ``request_rebuild`` 的三态结果字符串。
-        """
-        async with self._config_lock:
-            self._config_set("subscriptions", [sub.to_dict() for sub in subs])
-            await self._call_save_config()
-        return await self._rebuild(True)
-
     async def _api_subscriptions_item_post(self, request: web.Request) -> web.Response:
         """POST /api/subscriptions/item：单条新增或按 id 替换，立即落盘 + 重建。
 
-        校验经 ``_reject_reason``（与 normalize 判定一致）；返回规范化后的完整
-        订阅列表，前端可直接替换本地状态，无需二次整表刷新。
+        校验经 ``_reject_reason``（与 normalize 判定一致）；读取-规范化-写盘
+        整体在配置写锁内，避免并发 upsert 互相覆盖；返回规范化后的完整订阅
+        列表，前端可直接替换本地状态，无需二次整表刷新。
         """
         data = await self._read_json_body(request)
         if data is None:
@@ -462,23 +452,28 @@ class WebUIServer:
             return self._bad_request(reason)
         raw_id = raw_item.get("id")
         sub_id = raw_id if isinstance(raw_id, str) and raw_id else None
-        current = normalize(self._config_snapshot())
-        next_list: list[Any] = []
-        replaced = False
-        for sub in current:
-            if sub_id is not None and sub.id == sub_id:
+        async with self._config_lock:
+            current = normalize(self._config_snapshot())
+            next_list: list[Any] = []
+            replaced = False
+            for sub in current:
+                if sub_id is not None and sub.id == sub_id:
+                    next_list.append(raw_item)
+                    replaced = True
+                else:
+                    next_list.append(sub.to_dict())
+            if not replaced:
                 next_list.append(raw_item)
-                replaced = True
-            else:
-                next_list.append(sub.to_dict())
-        if not replaced:
-            next_list.append(raw_item)
-        snapshot = self._config_snapshot()
-        snapshot["subscriptions"] = next_list
-        valid = normalize(snapshot)
-        if len(valid) != len(next_list):
-            return self._bad_request("订阅项校验未通过（如平台不支持主动消息），未写入")
-        result = await self._commit_subscriptions(valid)
+            snapshot = self._config_snapshot()
+            snapshot["subscriptions"] = next_list
+            valid = normalize(snapshot)
+            if len(valid) != len(next_list):
+                return self._bad_request(
+                    "订阅项校验未通过（如平台不支持主动消息），未写入"
+                )
+            self._config_set("subscriptions", [sub.to_dict() for sub in valid])
+            await self._call_save_config()
+        result = await self._rebuild(True)
         return web.json_response(
             {
                 "ok": True,
@@ -488,13 +483,21 @@ class WebUIServer:
         )
 
     async def _api_subscriptions_delete(self, request: web.Request) -> web.Response:
-        """DELETE /api/subscriptions/{sub_id}：删除单条订阅，立即落盘 + 重建。"""
+        """DELETE /api/subscriptions/{sub_id}：删除单条订阅，立即落盘 + 重建。
+
+        读取-删除-写盘整体在配置写锁内，避免与并发写请求互相覆盖。
+        """
         sub_id = request.match_info.get("sub_id", "")
-        current = normalize(self._config_snapshot())
-        remaining = [sub for sub in current if sub.id != sub_id]
-        if len(remaining) == len(current):
-            return web.json_response({"ok": False, "error": "订阅不存在"}, status=404)
-        result = await self._commit_subscriptions(remaining)
+        async with self._config_lock:
+            current = normalize(self._config_snapshot())
+            remaining = [sub for sub in current if sub.id != sub_id]
+            if len(remaining) == len(current):
+                return web.json_response(
+                    {"ok": False, "error": "订阅不存在"}, status=404
+                )
+            self._config_set("subscriptions", [sub.to_dict() for sub in remaining])
+            await self._call_save_config()
+        result = await self._rebuild(True)
         return web.json_response(
             {
                 "ok": True,
@@ -567,6 +570,8 @@ class WebUIServer:
     async def _api_settings_post(self, request: web.Request) -> web.Response:
         """POST /api/settings：写回 credential/poll/webui 分组（锁内落盘、锁外重建）。
 
+        写前校验：poll 数值必须为有限且达下限（避免 0/负数/NaN/inf 引发紧循环
+        或睡眠异常），webui.port 必须为 1-65535 整数、host 必须为非空字符串。
         webui.host/port/enabled 变更仅插件重载后生效（README 注明），此处仅持久化。
         """
         data = await self._read_json_body(request)
@@ -582,6 +587,40 @@ class WebUIServer:
             merged[key] = value
         if not merged:
             return self._bad_request("请求体为空，无可写回的设置")
+        poll_value = merged.get("poll")
+        if poll_value is not None:
+            interval = poll_value.get("global_min_interval_sec")
+            if interval is not None:
+                try:
+                    interval_num = float(interval)
+                except (TypeError, ValueError, OverflowError):
+                    return self._bad_request("poll.global_min_interval_sec 必须为数字")
+                if not math.isfinite(interval_num) or interval_num < 1:
+                    return self._bad_request(
+                        "poll.global_min_interval_sec 必须为 ≥1 的有限数字"
+                    )
+            jitter = poll_value.get("poll_jitter_sec")
+            if jitter is not None:
+                try:
+                    jitter_num = float(jitter)
+                except (TypeError, ValueError, OverflowError):
+                    return self._bad_request("poll.poll_jitter_sec 必须为数字")
+                if not math.isfinite(jitter_num) or jitter_num < 0:
+                    return self._bad_request(
+                        "poll.poll_jitter_sec 必须为 ≥0 的有限数字"
+                    )
+        webui_value = merged.get("webui")
+        if webui_value is not None:
+            port = webui_value.get("port")
+            if port is not None and (
+                not isinstance(port, int)
+                or isinstance(port, bool)
+                or not 1 <= port <= 65535
+            ):
+                return self._bad_request("webui.port 必须为 1-65535 的整数")
+            host = webui_value.get("host")
+            if host is not None and (not isinstance(host, str) or not host.strip()):
+                return self._bad_request("webui.host 必须为非空字符串")
         async with self._config_lock:
             for key, value in merged.items():
                 current = self._config_get(key, None)

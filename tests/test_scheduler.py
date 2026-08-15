@@ -751,3 +751,37 @@ def test_maintenance_prune_called_every_6h(monkeypatch) -> None:
             await task
 
     asyncio.run(scenario())
+
+
+def test_poll_one_exception_does_not_kill_task() -> None:
+    """_poll_one 账务异常（非 CancelledError）不会杀死订阅轮询任务。"""
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        sleep = AutoSleep(clock)
+        repo = LiveFakeRepo()
+        db = InstantDb()
+        scheduler, _ = _make_scheduler(
+            [_live_sub("live-1", 10086, interval=1)],
+            repo,
+            db,
+            clock,
+            sleep,
+            poll_settings={"global_min_interval_sec": 1, "poll_jitter_sec": 0},
+        )
+        real_poll_one = scheduler._poll_one
+        calls: dict[str, int] = {"n": 0}
+
+        async def flaky(sub, poller) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("账务爆炸")
+            await real_poll_one(sub, poller)
+
+        scheduler._poll_one = flaky  # type: ignore[method-assign]
+        scheduler.start()
+        await _drive(lambda: repo.room_info_calls >= 2)
+        assert repo.room_info_calls >= 2  # 任务存活并继续轮询
+        await scheduler.stop()
+
+    asyncio.run(scenario())

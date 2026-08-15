@@ -445,7 +445,9 @@ class Scheduler:
 
         每轮先按 ``max(poll_interval_sec, global_min) + jitter`` 睡眠，再检查
         启用状态（enabled / 运行时自动禁用）决定是否轮询——被禁用的订阅也按
-        自身间隔重查，重新启用后无需重建即可恢复。``CancelledError`` 透传。
+        自身间隔重查，重新启用后无需重建即可恢复。``CancelledError`` 透传；
+        其余任何异常（含轮询后的账务逻辑）都记入错误计数并继续循环，绝不
+        让单个异常永久杀死该订阅的轮询任务。
         """
         while True:
             await self._sleep(self._interval_for(sub))
@@ -458,6 +460,15 @@ class Scheduler:
                 await self._poll_one(sub, poller)
             except asyncio.CancelledError:
                 raise
+            except Exception as exc:  # noqa: BLE001 - 账务异常不允许杀死轮询任务
+                self._logger.error(
+                    "轮询任务异常（sub=%s），已记录并继续: %s",
+                    sub.name,
+                    exc,
+                    exc_info=True,
+                )
+                entry = self._ensure_status(sub.id)
+                await self._record_error(sub, entry)
 
     def _interval_for(self, sub: Subscription) -> float:
         """订阅单轮间隔：``max(poll_interval_sec, global_min) + uniform(0, jitter)``。"""

@@ -25,6 +25,7 @@ try:
         ChannelSeriesType,
     )
     from bilibili_api.exceptions import (
+        ApiException,
         NetworkException,
         ResponseCodeException,
     )
@@ -56,6 +57,9 @@ except ImportError as _import_error:
     # SDK 未安装（离线环境）时的占位异常类，形状与真实 SDK 异常兼容，
     # 仅用于让下方错误映射逻辑可被离线 mock 测试覆盖；生产环境导入真实
     # SDK，此分支不生效。
+    class ApiException(Exception):
+        """bilibili_api.exceptions.ApiException 的离线占位基类。"""
+
     class NetworkException(Exception):
         """bilibili_api.exceptions.NetworkException 的离线占位类。"""
 
@@ -198,18 +202,28 @@ class SdkRepository(BiliRepository):
         return await user.get_live_info()
 
     async def _sdk_dynamics(self, uid: int, offset: str | int) -> dict[str, Any]:
-        """调用 SDK ``User.get_dynamics_new``。"""
+        """调用 SDK ``User.get_dynamics_new``。
+
+        ``offset`` 归一化：空与 ``"0"`` 均表示从头开始（polymer 接口第一页
+        传空串），其余原样透传。
+        """
         user = User(uid, credential=self._get_credential())
-        offset_str = "" if not offset else str(offset)
+        offset_str = str(offset).strip() if offset is not None else ""
+        if offset_str in ("", "0"):
+            offset_str = ""
         return await user.get_dynamics_new(offset=offset_str)
 
     async def _sdk_videos(
         self, uid: int, list_id: int, series_type: int, pn: int, ps: int
     ) -> dict[str, Any]:
         """调用 SDK ``ChannelSeries.get_videos``（合集/系列，按默认排序分页）。"""
+        try:
+            series_type_enum = ChannelSeriesType(series_type)
+        except ValueError as exc:
+            raise BiliApiError(f"非法的 series_type: {series_type}") from exc
         series = ChannelSeries(
             uid=uid,
-            type_=ChannelSeriesType(series_type),
+            type_=series_type_enum,
             id_=list_id,
             credential=self._get_credential(),
         )
@@ -281,15 +295,20 @@ class SdkRepository(BiliRepository):
             raise BiliAuthError(f"B 站凭据缺少 buvid3/buvid4: {exc}") from exc
         except ResponseCodeException as exc:
             raise self._map_response_error(exc) from exc
+        except ApiException as exc:
+            # 兜底：SDK 其余未分类异常（ArgsException/VerifyException 等）
+            # 一律映射为 BiliApiError，维持「SDK 失败必为 BiliError」契约。
+            raise BiliApiError(f"B 站 SDK 异常: {exc}") from exc
 
     @staticmethod
     def _map_response_error(exc: ResponseCodeException) -> BiliError:
         """将 SDK ``ResponseCodeException`` 按 code 映射为类型化异常。"""
         code = exc.code
+        message = getattr(exc, "msg", "") or getattr(exc, "message", "")
         if code in _RATE_LIMIT_CODES:
-            return BiliRateLimited(f"B 站风控/频率限制（code={code}）: {exc.msg}")
+            return BiliRateLimited(f"B 站风控/频率限制（code={code}）: {message}")
         if code in _AUTH_CODES:
-            return BiliAuthError(f"B 站凭据无效或未授权（code={code}）: {exc.msg}")
+            return BiliAuthError(f"B 站凭据无效或未授权（code={code}）: {message}")
         if code == _NOT_FOUND_CODE:
-            return BiliNotFound(f"B 站资源不存在（code={code}）: {exc.msg}")
-        return BiliApiError(f"B 站接口错误（code={code}）: {exc.msg}")
+            return BiliNotFound(f"B 站资源不存在（code={code}）: {message}")
+        return BiliApiError(f"B 站接口错误（code={code}）: {message}")
