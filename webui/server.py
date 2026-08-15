@@ -52,6 +52,7 @@ from uuid import uuid4
 from aiohttp import web
 
 try:
+    from .. import util
     from ..config import (
         SUBSCRIPTION_TYPES,
         _REQUIRED_FIELDS,
@@ -62,6 +63,7 @@ try:
     )
     from ..push import format_event_time
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
     from config import (  # type: ignore[import-not-found]
         SUBSCRIPTION_TYPES,
         _REQUIRED_FIELDS,
@@ -76,21 +78,6 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
 _LOG_RING_MAX = 500
 #: /api/logs 未指定 tail 时的默认条数。
 _LOG_TAIL_DEFAULT = 100
-
-_logger: logging.Logger | None = None
-
-
-def _get_logger() -> logging.Logger:
-    """返回插件统一 logger；离线环境回退 stdlib logger。"""
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger("astrbot_plugin_bilibili_cj")
-        else:
-            _logger = astrbot_logger
-    return _logger
 
 
 def _auth_middleware_factory(get_token: Callable[[], str]) -> Any:
@@ -180,7 +167,7 @@ class WebUIServer:
         self._config = config
         self._request_rebuild = request_rebuild
         self._status_provider = status_provider
-        self._logger = logger if logger is not None else _get_logger()
+        self._logger = logger if logger is not None else util.get_logger()
         self._save_config = save_config
         self._config_lock = config_lock if config_lock is not None else asyncio.Lock()
         self._build_chain = (

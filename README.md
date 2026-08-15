@@ -290,7 +290,11 @@ B 站对高频率 API 访问有反爬 / 风控机制，请务必注意：
 
 ```
 astrbot_plugin_bilibili_cj/
-├── main.py                # 插件主入口：Star 类、生命周期、热重载接线
+├── main.py                # 插件入口：BilibiliMonitor(Star) + /bili 指令 + 历史名字重导出
+├── lifecycle.py           # 组件装配 / 启停 / 登录状态监控
+├── config_reloader.py     # 配置热重载器（防抖 + watcher + 状态清理）
+├── config_file.py         # 配置文件路径解析 / 安装兜底初始化 / 批量配置合并
+├── util.py                # 跨模块公共小工具（logger / 时间 / 取牌 / 类型标签）
 ├── config.py              # 配置校验与规范化（normalize）
 ├── _conf_schema.json      # AstrBot 配置面板的 Schema 定义
 ├── config.example.json    # 配置模板（含三类订阅示例）

@@ -22,15 +22,16 @@ aborts a push.
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta, timezone
 from string import Formatter
 from types import SimpleNamespace
 from typing import Any
 
 try:
+    from . import util
     from .config import Subscription, validate_session
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
     from config import Subscription, validate_session  # type: ignore[import-not-found]
 
 try:
@@ -65,21 +66,6 @@ _TEMPLATES: dict[str, str] = {
     "collection": "【B站合集更新】{name}\n视频：{video_title}\n合集：{list_name}\n发布时间：{publish_time}\n链接：{url}",
     "alert": "【B站监控告警】{content}",
 }
-
-_logger: Any = None
-
-
-def _get_logger() -> Any:
-    """Return the AstrBot plugin logger, falling back to stdlib logging offline."""
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger(__name__)
-        else:
-            _logger = astrbot_logger
-    return _logger
 
 
 def _coerce(value: Any) -> str:
@@ -187,7 +173,7 @@ def build_chain(event_type: str, payload: dict) -> Any:
             image = Comp.Image.fromURL(str(raw_url))
             chain.chain.append(image)
         except Exception as exc:  # noqa: BLE001 - 图片失败必须降级而非中断推送
-            _get_logger().warning(
+            util.get_logger(__name__).warning(
                 "图片加载失败（event=%s, url=%s），跳过该图片: %s",
                 event_type,
                 raw_url,
@@ -209,11 +195,6 @@ def _ensure_status(status: dict[str, Any], sub_id: str) -> Any:
         entry = SimpleNamespace(last_push_at=None, last_error=None)
         status[sub_id] = entry
     return entry
-
-
-def _now_iso() -> str:
-    """Current UTC time as an ISO-8601 string (lexicographically sortable)."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def format_event_time(timestamp: Any) -> str:
@@ -276,7 +257,7 @@ async def send(
         try:
             validate_session(session)
         except ValueError as exc:
-            _get_logger().warning("跳过非法推送会话 %s: %s", session, exc)
+            util.get_logger(__name__).warning("跳过非法推送会话 %s: %s", session, exc)
             results[session] = False
             if last_error is None:
                 last_error = f"非法会话 {session}: {exc}"
@@ -289,7 +270,7 @@ async def send(
             send_error = exc
         results[session] = ok
         if ok:
-            _get_logger().info(
+            util.get_logger(__name__).info(
                 "推送成功 → 会话 %s（订阅：%s）", session, subscription.name
             )
             any_success = True
@@ -299,7 +280,7 @@ async def send(
                 if send_error is not None
                 else "平台未找到或目标不可达"
             )
-            _get_logger().warning(
+            util.get_logger(__name__).warning(
                 "推送失败 → 会话 %s（订阅：%s）: %s",
                 session,
                 subscription.name,
@@ -309,7 +290,7 @@ async def send(
                 last_error = f"会话 {session} 发送失败: {reason}"
     if any_success:
         entry = _ensure_status(status, subscription.id)
-        entry.last_push_at = _now_iso()
+        entry.last_push_at = util.now_iso()
         entry.last_error = None
     elif last_error is not None:
         entry = _ensure_status(status, subscription.id)

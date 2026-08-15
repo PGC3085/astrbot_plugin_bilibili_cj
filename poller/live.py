@@ -19,19 +19,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 try:
+    from .. import util
     from ..config import Subscription
     from ..db import Database
     from ..push import format_event_time
     from ..repository import BiliError, BiliRepository
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
     from config import Subscription  # type: ignore[import-not-found]
     from db import Database  # type: ignore[import-not-found]
     from push import format_event_time  # type: ignore[import-not-found]
@@ -43,31 +43,6 @@ _OFFLINE_STRIKES: int = 3
 _MAX_RETRY_ROUNDS: int = 3
 #: pending_push 过期时间（秒）。
 _PENDING_TTL: int = 24 * 60 * 60
-
-_logger: logging.Logger | None = None
-
-
-async def _noop_acquire() -> None:
-    """默认无操作取牌：未注入令牌桶时行为与之前完全一致。"""
-    return None
-
-
-def _get_logger() -> logging.Logger:
-    """返回插件统一 logger；离线环境回退 stdlib logger。"""
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger(__name__)
-        else:
-            _logger = astrbot_logger
-    return _logger
-
-
-def _now_iso() -> str:
-    """当前 UTC 时间的 ISO-8601 字符串（可字典序排序）。"""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class LivePoller:
@@ -98,7 +73,7 @@ class LivePoller:
         build_chain: Any,
         send: Any,
         status: dict[str, Any],
-        logger: logging.Logger | None = None,
+        logger: Any | None = None,
         context: Any = None,
         push_title_change: bool = True,
         now: Any = time.time,
@@ -111,12 +86,12 @@ class LivePoller:
         self.build_chain = build_chain
         self.send = send
         self.status = status
-        self._logger = logger if logger is not None else _get_logger()
+        self._logger = logger if logger is not None else util.get_logger(__name__)
         self.context = context
         self.push_title_change = push_title_change
         self.now = now
         self._acquire: Callable[[], Awaitable[None]] = (
-            acquire if acquire is not None else _noop_acquire
+            acquire if acquire is not None else util.noop_acquire
         )
         self.push_cover = push_cover
         self.error_count = 0
@@ -182,7 +157,7 @@ class LivePoller:
                     last_status=0,
                     consecutive_offline_count=0,
                     offline_notified=0,
-                    last_checked_at=_now_iso(),
+                    last_checked_at=util.now_iso(),
                 )
                 return
             room = await self._fetch_room(room_id)
@@ -198,7 +173,7 @@ class LivePoller:
             "last_live_time": 0,
             "consecutive_offline_count": 0,
             "offline_notified": 0,
-            "last_checked_at": _now_iso(),
+            "last_checked_at": util.now_iso(),
         }
         if status == 1:
             fields["last_title"] = room["title"]
@@ -286,7 +261,7 @@ class LivePoller:
             "last_status": 1,
             "last_title": title,
             "consecutive_offline_count": 0,
-            "last_checked_at": _now_iso(),
+            "last_checked_at": util.now_iso(),
         }
         if start > 0:
             fields["last_live_time"] = start
@@ -339,7 +314,7 @@ class LivePoller:
         fields: dict[str, Any] = {
             "last_status": status,
             "consecutive_offline_count": count,
-            "last_checked_at": _now_iso(),
+            "last_checked_at": util.now_iso(),
         }
         if not armed:
             fields["consecutive_offline_count"] = 0  # 从未直播：不计数不推

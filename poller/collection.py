@@ -22,17 +22,18 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
 try:
+    from .. import util
     from ..config import Subscription
     from ..db import Database
     from ..push import format_event_time
     from ..repository import BiliError, BiliRepository
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
     from config import Subscription  # type: ignore[import-not-found]
     from db import Database  # type: ignore[import-not-found]
     from push import format_event_time  # type: ignore[import-not-found]
@@ -44,26 +45,6 @@ _PAGE_SIZE: int = 20
 _MAX_RETRY_ROUNDS: int = 3
 #: seed 标志所在持久化表（v2 代标记：解析缺陷修复后强制重 seed，避免洪水推送）。
 _SEED_TABLE: str = "collection_state_v2"
-
-_logger: logging.Logger | None = None
-
-
-async def _noop_acquire() -> None:
-    """默认无操作取牌：未注入令牌桶时行为与之前完全一致。"""
-    return None
-
-
-def _get_logger() -> logging.Logger:
-    """返回插件统一 logger；离线环境回退 stdlib logger。"""
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger(__name__)
-        else:
-            _logger = astrbot_logger
-    return _logger
 
 
 class CollectionPoller:
@@ -99,7 +80,7 @@ class CollectionPoller:
         context: Any,
         status: dict[str, Any],
         retry_counts: dict[str, dict[str, int]],
-        logger: logging.Logger | None = None,
+        logger: Any | None = None,
         acquire: Callable[[], Awaitable[None]] | None = None,
         push_cover: bool = True,
     ) -> None:
@@ -112,10 +93,10 @@ class CollectionPoller:
         self.status = status
         self.retry_counts = retry_counts
         self._acquire: Callable[[], Awaitable[None]] = (
-            acquire if acquire is not None else _noop_acquire
+            acquire if acquire is not None else util.noop_acquire
         )
         self.push_cover = push_cover
-        self._logger = logger if logger is not None else _get_logger()
+        self._logger = logger if logger is not None else util.get_logger(__name__)
         self.error_count = 0
 
     async def poll(self) -> None:

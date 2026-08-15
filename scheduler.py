@@ -27,14 +27,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import random
 import time
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 try:
+    from . import util
     from .config import Subscription, coerce_bool
     from .db import Database
     from .poller.collection import CollectionPoller
@@ -43,6 +42,7 @@ try:
     from .push import format_event_time
     from .repository import BiliRepository, SdkRepository
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
     from config import Subscription, coerce_bool  # type: ignore[import-not-found]
     from db import Database  # type: ignore[import-not-found]
     from poller.collection import CollectionPoller  # type: ignore[import-not-found]
@@ -61,26 +61,6 @@ _BACKOFF_MAX_SEC: float = 300.0
 _MAX_CONSECUTIVE_ERRORS: int = 10
 #: 维护任务周期（秒，6 小时）。
 _MAINTENANCE_INTERVAL_SEC: float = 6 * 3600.0
-
-_logger: logging.Logger | None = None
-
-
-def _get_logger() -> logging.Logger:
-    """返回插件统一 logger；离线环境回退 stdlib logger。"""
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger(__name__)
-        else:
-            _logger = astrbot_logger
-    return _logger
-
-
-def _now_iso() -> str:
-    """当前 UTC 时间的 ISO-8601 字符串（可字典序排序）。"""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class TokenBucket:
@@ -183,7 +163,7 @@ class Scheduler:
         status: dict[str, Any] | None = None,
         retry_counts: dict[str, dict[str, int]] | None = None,
         poll_settings: dict[str, Any] | None = None,
-        logger: logging.Logger | None = None,
+        logger: Any | None = None,
         now: Callable[[], float] | None = None,
         loop: Any = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -208,7 +188,7 @@ class Scheduler:
         self.retry_counts: dict[str, dict[str, int]] = (
             retry_counts if retry_counts is not None else {}
         )
-        self._logger = logger if logger is not None else _get_logger()
+        self._logger = logger if logger is not None else util.get_logger(__name__)
         self._now: Callable[[], float] = now if now is not None else time.monotonic
         #: 轮询器使用的 epoch 时钟：``time.monotonic`` 无纪元语义，若误传给
         #: 直播轮询器会把「下播时间/时长」算成 1970 年起的垃圾值（时长恒 0）。
@@ -515,7 +495,7 @@ class Scheduler:
         ``poller.error_count`` 增量兜底（LivePoller 持有）。
         """
         entry = self._ensure_status(sub.id)
-        entry.last_poll = _now_iso()
+        entry.last_poll = util.now_iso()
         entry.last_error = None
         errors_before = int(getattr(poller, "error_count", 0))
         try:

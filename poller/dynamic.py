@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
@@ -33,10 +32,12 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
     from poller import dynamic_parser  # type: ignore[import-not-found]
 
 try:
+    from .. import util
     from ..config import Subscription
     from ..db import Database
     from ..repository import BiliError, BiliRepository
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
     from config import Subscription  # type: ignore[import-not-found]
     from db import Database  # type: ignore[import-not-found]
     from repository import BiliError, BiliRepository  # type: ignore[import-not-found]
@@ -51,26 +52,6 @@ _SEED_TABLE: str = "dynamic_state_v2"
 #: 兼容旧导入路径（tests 与自查脚本从 poller.dynamic 导入常量）。
 TYPE_ACTION: dict[int, str] = dynamic_parser.TYPE_ACTION
 FORWARD_ACTION: dict[int, str] = dynamic_parser.FORWARD_ACTION
-
-_logger: logging.Logger | None = None
-
-
-async def _noop_acquire() -> None:
-    """默认无操作取牌：未注入令牌桶时行为与之前完全一致。"""
-    return None
-
-
-def _get_logger() -> logging.Logger:
-    """返回插件统一 logger；离线环境回退 stdlib logger。"""
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger(__name__)
-        else:
-            _logger = astrbot_logger
-    return _logger
 
 
 class DynamicPoller:
@@ -109,7 +90,7 @@ class DynamicPoller:
         context: Any,
         status: dict[str, Any],
         retry_counts: dict[str, dict[str, int]],
-        logger: logging.Logger | None = None,
+        logger: Any | None = None,
         acquire: Callable[[], Awaitable[None]] | None = None,
         push_cover: bool = True,
         push_live_share: bool = False,
@@ -123,9 +104,9 @@ class DynamicPoller:
         self.status = status
         self.retry_counts = retry_counts
         self._acquire: Callable[[], Awaitable[None]] = (
-            acquire if acquire is not None else _noop_acquire
+            acquire if acquire is not None else util.noop_acquire
         )
-        self._logger = logger if logger is not None else _get_logger()
+        self._logger = logger if logger is not None else util.get_logger(__name__)
         self.push_cover = push_cover
         self.push_live_share = push_live_share
         self.error_count = 0

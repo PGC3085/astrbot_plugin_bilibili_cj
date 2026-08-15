@@ -12,14 +12,17 @@ can point the :class:`Database` at a temporary file without importing AstrBot.
 from __future__ import annotations
 
 import asyncio
-import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
 import aiosqlite
+
+try:
+    from . import util
+except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
 
 _PLUGIN_DATA_DIR_NAME: Final = "astrbot_plugin_bilibili_cj"
 _DB_FILE_NAME: Final = "state.db"
@@ -114,30 +117,6 @@ _DDL: Final = (
     )""",
 )
 
-_logger: logging.Logger | None = None
-
-
-def _get_logger() -> logging.Logger:
-    """Return the AstrBot plugin logger when running inside AstrBot, else stdlib.
-
-    Kept lazy so importing this module never depends on AstrBot being installed
-    (offline tests and the smoke test use the stdlib fallback).
-    """
-    global _logger
-    if _logger is None:
-        try:
-            from astrbot.api import logger as astrbot_logger  # type: ignore[import-not-found]
-        except ImportError:
-            _logger = logging.getLogger(__name__)
-        else:
-            _logger = astrbot_logger
-    return _logger
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string (lexicographically sortable)."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
 
 @dataclass(frozen=True, slots=True)
 class LiveState:
@@ -190,7 +169,7 @@ class Database:
         try:
             from astrbot.core.utils.astrbot_path import get_astrbot_data_path
         except ImportError:
-            _get_logger().warning(
+            util.get_logger(__name__).warning(
                 "get_astrbot_data_path unavailable; using ./data/plugin_data/%s",
                 _PLUGIN_DATA_DIR_NAME,
             )
@@ -274,7 +253,7 @@ class Database:
             cursor = await self._require_conn().execute(
                 "INSERT OR IGNORE INTO known_dynamics "
                 "(sub_id, dynamic_id, type, seen_at) VALUES (?, ?, ?, ?)",
-                (sub_id, dynamic_id, type_, _now_iso()),
+                (sub_id, dynamic_id, type_, util.now_iso()),
             )
             return cursor.rowcount > 0
 
@@ -296,7 +275,7 @@ class Database:
             cursor = await self._require_conn().execute(
                 "INSERT OR IGNORE INTO known_videos "
                 "(sub_id, bvid, uid, list_id, seen_at) VALUES (?, ?, ?, ?, ?)",
-                (sub_id, bvid, uid, list_id, _now_iso()),
+                (sub_id, bvid, uid, list_id, util.now_iso()),
             )
             return cursor.rowcount > 0
 
@@ -434,7 +413,7 @@ class Database:
         be re-scanned and re-pushed.
         """
         if _PRUNE_KEEP_PER_SUB <= 10 * _DYNAMICS_PAGE_MAX:
-            _get_logger().warning(
+            util.get_logger(__name__).warning(
                 "known_dynamics prune window %d is not > 10 x page max %d; "
                 "pruned rows may fall inside the scan window and be re-pushed",
                 _PRUNE_KEEP_PER_SUB,

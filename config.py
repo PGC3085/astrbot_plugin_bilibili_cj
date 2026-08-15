@@ -16,11 +16,11 @@ from typing import Any
 from uuid import uuid4
 
 try:
-    from astrbot.api import logger
-except ImportError:  # pragma: no cover - 离线测试环境无 AstrBot 运行时
-    import logging
+    from . import util
+except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
+    import util  # type: ignore[import-not-found]
 
-    logger = logging.getLogger("astrbot_plugin_bilibili_cj")
+logger = util.get_logger(__name__)
 
 SUBSCRIPTION_TYPES: tuple[str, ...] = ("live", "dynamic", "collection")
 """支持的订阅类型。"""
