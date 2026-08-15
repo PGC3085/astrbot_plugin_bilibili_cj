@@ -94,6 +94,61 @@ def test_collection_template_renders_publish_time() -> None:
     assert "发布时间：2023-11-14 22:13:20" in text
 
 
+def test_truncation_keeps_url_at_end() -> None:
+    """超长正文截断后，链接仍完整保留在消息末尾（不再被截掉）。"""
+
+    text = text_for(
+        "dynamic",
+        {
+            "name": "UP",
+            "type_text": "文字",
+            "content": "很" * 1000,
+            "event_time": "2023-11-14 22:13:20",
+            "url": "https://t.bilibili.com/1",
+        },
+    )
+    assert text.endswith("链接：https://t.bilibili.com/1")
+    assert text.count("链接：") == 1  # 链接行不重复
+    body = text.rsplit("\n链接：", 1)[0]
+    assert len(body) <= 500  # 正文截断到上限，链接不计入
+
+
+def test_truncation_keeps_url_for_live_on() -> None:
+    """开播推送（live_on）超长标题同样保留链接。"""
+
+    text = text_for(
+        "live_on",
+        {
+            "name": "主播",
+            "title": "标" * 1000,
+            "area_name": "分区",
+            "live_start_time": "2023-11-14 22:13:20",
+            "url": "https://live.bilibili.com/1",
+        },
+    )
+    assert text.endswith("链接：https://live.bilibili.com/1")
+    body = text.rsplit("\n链接：", 1)[0]
+    assert len(body) <= 500
+
+
+def test_short_text_unaffected_by_url_reappend() -> None:
+    """短文本：链接行仅出现一次、内容不变形。"""
+
+    text = text_for(
+        "dynamic",
+        {
+            "name": "UP",
+            "type_text": "文字",
+            "content": "短内容",
+            "event_time": "2023-11-14 22:13:20",
+            "url": "https://t.bilibili.com/1",
+        },
+    )
+    assert text.endswith("链接：https://t.bilibili.com/1")
+    assert text.count("链接：") == 1
+    assert "短内容" in text
+
+
 def test_send_logs_per_session_results() -> None:
     """``push.send`` 逐会话记录推送结果日志（成功 info / 失败 warning）。"""
 

@@ -1,7 +1,7 @@
 name: astrbot_plugin_bilibili_cj
 display_name: B站监控
 desc: 监控B站UP主直播开播/下播、动态更新与合集视频更新，检测到新内容后自动推送到指定会话
-version: v1.1.0
+version: v1.1.1
 author: astrbot-bilibili
 support_platforms:
   - aiocqhttp

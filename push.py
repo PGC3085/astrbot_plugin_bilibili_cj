@@ -124,7 +124,9 @@ def text_for(event_type: str, payload: dict) -> str:
             ``cover`` (URL, optional) is only consumed by :func:`build_chain`.
 
     Returns:
-        The rendered push text, truncated to :data:`_MAX_TEXT_LEN` characters.
+        The rendered push text. 正文截断到 :data:`_MAX_TEXT_LEN` 字符；若载荷
+        携带 ``url`` 且模板含链接行，则**链接永远保留**：正文先截断，链接行
+        在末尾补回（截断不再切掉用户最可操作的链接）。
     """
     template = _TEMPLATES.get(event_type)
     if template is None:
@@ -132,7 +134,15 @@ def text_for(event_type: str, payload: dict) -> str:
     values = {
         field: _coerce(payload.get(field)) for field in _template_fields(template)
     }
-    return _truncate(template.format(**values))
+    url = values.get("url") or ""
+    body_template = template
+    if url and "{url}" in template:
+        # 摘除模板自带的链接行：正文截断后再统一补回，保证链接不被截掉
+        body_template = template.replace("\n链接：{url}", "")
+    truncated = _truncate(body_template.format(**values))
+    if url and "{url}" in template:
+        return f"{truncated}\n链接：{url}"
+    return truncated
 
 
 def build_chain(event_type: str, payload: dict) -> Any:
