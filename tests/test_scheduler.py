@@ -261,6 +261,17 @@ def _collection_sub(sub_id: str, uid: int, interval: int = 300) -> Subscription:
     )
 
 
+def _dynamic_sub(sub_id: str, uid: int, interval: int = 300) -> Subscription:
+    return Subscription(
+        id=sub_id,
+        type="dynamic",
+        name="测试动态订阅",
+        uid=uid,
+        poll_interval_sec=interval,
+        push_session_ids=[_SESSION],
+    )
+
+
 def _make_scheduler(
     subs: list[Subscription],
     repo: Any,
@@ -805,3 +816,50 @@ def test_live_poller_receives_epoch_clock() -> None:
     assert scheduler._epoch_now() > 1_000_000_000
     pollers = scheduler._build_pollers()
     assert pollers["live-1"].now is scheduler._epoch_now
+
+
+def test_push_cover_string_false_respected() -> None:
+    """手改配置把 push_dynamic_cover 写成字符串 "false" → 正确关闭（不再误判开）。"""
+
+    scheduler = Scheduler(
+        subscriptions=[_live_sub("live-1", 10086, interval=60)],
+        credential_cfg={},
+        repo=object(),
+        db=None,
+        build_chain=build_chain,
+        send=send,
+        context=FakeContext(),
+        status={},
+        retry_counts={},
+        poll_settings={
+            "push_dynamic_cover": "false",
+            "push_live_cover": "false",
+            "push_collection_cover": False,
+            "push_dynamic_live_share": "true",
+        },
+    )
+    assert scheduler._push_dynamic_cover is False
+    assert scheduler._push_live_cover is False
+    assert scheduler._push_collection_cover is False
+    assert scheduler._push_dynamic_live_share is True
+    assert "动态封面=关" in scheduler.push_settings_summary()
+    assert "直播封面=关" in scheduler.push_settings_summary()
+
+
+def test_push_cover_flag_reaches_dynamic_poller() -> None:
+    """push_dynamic_cover=false 会真正传递到动态轮询器（端到端接线）。"""
+
+    scheduler = Scheduler(
+        subscriptions=[_dynamic_sub("dyn-1", 10086, interval=60)],
+        credential_cfg={},
+        repo=object(),
+        db=None,
+        build_chain=build_chain,
+        send=send,
+        context=FakeContext(),
+        status={},
+        retry_counts={},
+        poll_settings={"push_dynamic_cover": False},
+    )
+    pollers = scheduler._build_pollers()
+    assert pollers["dyn-1"].push_cover is False

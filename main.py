@@ -53,9 +53,9 @@ except ImportError:  # pragma: no cover - 离线测试环境无 AstrBot 运行�
     astrbot_filter = None  # type: ignore[assignment,misc]
 
 try:
-    from .config import Subscription, normalize
+    from .config import Subscription, coerce_bool, normalize
 except ImportError:  # pragma: no cover - 离线裸模块导入（测试）
-    from config import Subscription, normalize  # type: ignore[import-not-found]
+    from config import Subscription, coerce_bool, normalize  # type: ignore[import-not-found]
 
 try:
     from . import push
@@ -984,8 +984,8 @@ class PluginLifecycle:
         return dict(cfg) if isinstance(cfg, dict) else {}
 
     def _login_monitor_enabled(self) -> bool:
-        """是否启用登录状态监控（schema 缺省 true）。"""
-        return bool(self._login_monitor_cfg().get("enabled", True))
+        """是否启用登录状态监控（schema 缺省 true；字符串 "false" 不再误判为开）。"""
+        return coerce_bool(self._login_monitor_cfg().get("enabled"), True)
 
     def _login_monitor_interval(self) -> float:
         """登录校验间隔（秒），钳制到 :data:`_LOGIN_MONITOR_MIN_INTERVAL` 以上。"""
@@ -1122,7 +1122,10 @@ class PluginLifecycle:
         return []
 
     def _log_subscriptions(self) -> None:
-        """把当前订阅清单打印到 AstrBot 控制台（启动时调用一次）。"""
+        """把当前订阅清单与推送开关摘要打印到 AstrBot 控制台（启动时调用一次）。"""
+        summary = getattr(self.scheduler, "push_settings_summary", None)
+        if callable(summary):
+            self._logger.info("推送开关：%s", summary())
         subs = self.current_subscriptions()
         if not subs:
             self._logger.info("当前没有有效订阅（subscriptions 为空或全部被过滤）。")

@@ -226,6 +226,33 @@ def _to_int_or_none(raw: Any) -> int | None:
     return None
 
 
+def coerce_bool(value: Any, default: bool = True) -> bool:
+    """把配置值解析为布尔。
+
+    关键点：手改配置时常把布尔写成字符串（如 ``"false"``），而 Python 的
+    ``bool("false")`` 为 ``True``——会把用户关闭的开关静默重新打开。这里
+    显式识别常见真假字符串形态，其余类型回退默认值。
+
+    Args:
+        value: 原始配置值（bool / str / int / float 等）。
+        default: 无法识别时的默认值。
+
+    Returns:
+        解析出的布尔值。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in ("1", "true", "yes", "on"):
+            return True
+        if stripped in ("0", "false", "no", "off", ""):
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 def _normalize_sessions(raw_sessions: Any) -> list[str]:
     """过滤出形状合法的会话字符串。
 
@@ -363,9 +390,7 @@ def _normalize_subscription(raw: Any, index: int) -> Subscription | None:
         interval_value = float(POLL_SUB_INTERVAL_MIN)
     poll_interval_sec = int(interval_value)
 
-    enabled = raw.get("enabled", True)
-    if not isinstance(enabled, bool):
-        enabled = bool(enabled)
+    enabled = coerce_bool(raw.get("enabled"), True)
 
     raw_id = raw.get("id")
     sub_id = raw_id if isinstance(raw_id, str) and raw_id else str(uuid4())

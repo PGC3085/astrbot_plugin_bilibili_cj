@@ -468,6 +468,34 @@ def test_poll_non_finite_min_interval_clamped() -> None:
         assert cfg["poll"]["global_min_interval_sec"] == 1
 
 
+def test_coerce_bool_handles_string_false() -> None:
+    """字符串 "false" 不再被 bool() 误判为 True。"""
+    from config import coerce_bool
+
+    assert coerce_bool(False) is False
+    assert coerce_bool(True) is True
+    assert coerce_bool("false") is False
+    assert coerce_bool("False") is False
+    assert coerce_bool("off") is False
+    assert coerce_bool("0") is False
+    assert coerce_bool("") is False
+    assert coerce_bool("true") is True
+    assert coerce_bool("on") is True
+    assert coerce_bool("1") is True
+    assert coerce_bool("随便") is True  # 无法识别 → 默认 True
+    assert coerce_bool("随便", False) is False
+
+
+def test_subscription_enabled_string_false_respected() -> None:
+    """订阅 enabled 写成字符串 "false" → 正确解析为停用（不再误判启用）。"""
+    cfg = _full_config()
+    cfg["subscriptions"] = [cfg["subscriptions"][0]]
+    cfg["subscriptions"][0]["enabled"] = "false"
+    subs = normalize(cfg)
+    assert len(subs) == 1
+    assert subs[0].enabled is False
+
+
 # --------------------------------------------------------------------------
 # 6. 稳定 id
 # --------------------------------------------------------------------------

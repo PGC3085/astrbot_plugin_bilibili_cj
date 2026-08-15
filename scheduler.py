@@ -35,14 +35,14 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 try:
-    from .config import Subscription
+    from .config import Subscription, coerce_bool
     from .db import Database
     from .poller.collection import CollectionPoller
     from .poller.dynamic import DynamicPoller
     from .poller.live import LivePoller
     from .repository import BiliRepository, SdkRepository
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
-    from config import Subscription  # type: ignore[import-not-found]
+    from config import Subscription, coerce_bool  # type: ignore[import-not-found]
     from db import Database  # type: ignore[import-not-found]
     from poller.collection import CollectionPoller  # type: ignore[import-not-found]
     from poller.dynamic import DynamicPoller  # type: ignore[import-not-found]
@@ -253,12 +253,27 @@ class Scheduler:
             self._jitter = max(0.0, float(raw_jitter))
         except (TypeError, ValueError):
             self._jitter = 0.0
-        self._push_title_change = bool(settings.get("push_title_change", True))
-        self._push_live_cover = bool(settings.get("push_live_cover", True))
-        self._push_dynamic_cover = bool(settings.get("push_dynamic_cover", True))
-        self._push_collection_cover = bool(settings.get("push_collection_cover", True))
-        self._push_dynamic_live_share = bool(
-            settings.get("push_dynamic_live_share", False)
+        self._push_title_change = coerce_bool(settings.get("push_title_change"), True)
+        self._push_live_cover = coerce_bool(settings.get("push_live_cover"), True)
+        self._push_dynamic_cover = coerce_bool(settings.get("push_dynamic_cover"), True)
+        self._push_collection_cover = coerce_bool(
+            settings.get("push_collection_cover"), True
+        )
+        self._push_dynamic_live_share = coerce_bool(
+            settings.get("push_dynamic_live_share"), False
+        )
+
+    def push_settings_summary(self) -> str:
+        """返回推送开关摘要（启动日志与排查用）。"""
+
+        def state(flag: bool) -> str:
+            return "开" if flag else "关"
+
+        return (
+            f"直播封面={state(self._push_live_cover)} "
+            f"动态封面={state(self._push_dynamic_cover)} "
+            f"合集封面={state(self._push_collection_cover)} "
+            f"直播分享动态={state(self._push_dynamic_live_share)}"
         )
 
     def _new_bucket(self) -> TokenBucket:

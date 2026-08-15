@@ -695,19 +695,25 @@ def test_v1_seeded_state_reseeded_silently_no_flood(tmp_path) -> None:
 
 
 def test_dynamic_payload_cover_gated_by_setting(tmp_path) -> None:
-    """push_cover=False 时动态载荷不携带封面；缺省 True 时携带。"""
+    """push_cover=False 时动态载荷不携带封面；缺省 True 时携带（含图片动态）。"""
 
     async def scenario() -> None:
         db = Database(tmp_path / "state.db")
         await db.init()
-        item = _item(100, 8, title="A", cover="https://example.com/c.jpg")
+        av_item = _item(100, 8, title="A", cover="https://example.com/c.jpg")
+        draw_item = _item(101, 2, cover="https://example.com/d.jpg")
 
         poller_on, _ = _make_poller(FakeRepo([_page([])]), db)
-        payload = poller_on._payload(poller_on.subscription, item, "100", 8)
+        payload = poller_on._payload(poller_on.subscription, av_item, "100", 8)
         assert payload["cover"] == "https://example.com/c.jpg"
+        # 图片动态（draw）：首图 src 作为封面，同样受开关控制
+        payload = poller_on._payload(poller_on.subscription, draw_item, "101", 2)
+        assert payload["cover"] == "https://example.com/d.jpg"
 
         poller_off, _ = _make_poller(FakeRepo([_page([])]), db, push_cover=False)
-        payload = poller_off._payload(poller_off.subscription, item, "100", 8)
+        payload = poller_off._payload(poller_off.subscription, av_item, "100", 8)
+        assert "cover" not in payload
+        payload = poller_off._payload(poller_off.subscription, draw_item, "101", 2)
         assert "cover" not in payload
         await db.close()
 
