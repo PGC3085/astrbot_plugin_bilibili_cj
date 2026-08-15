@@ -217,6 +217,9 @@ class Scheduler:
         self._global_min = 60.0
         self._jitter = 0.0
         self._push_title_change = True
+        self._push_live_cover = True
+        self._push_dynamic_cover = True
+        self._push_collection_cover = True
         self._apply_poll_settings(poll_settings)
 
         self._bucket = self._new_bucket()
@@ -246,6 +249,9 @@ class Scheduler:
         except (TypeError, ValueError):
             self._jitter = 0.0
         self._push_title_change = bool(settings.get("push_title_change", True))
+        self._push_live_cover = bool(settings.get("push_live_cover", True))
+        self._push_dynamic_cover = bool(settings.get("push_dynamic_cover", True))
+        self._push_collection_cover = bool(settings.get("push_collection_cover", True))
 
     def _new_bucket(self) -> TokenBucket:
         """按当前订阅重建令牌桶（容量 3、速率=聚合轮询需求，见 :meth:`_bucket_rate`）。"""
@@ -289,6 +295,7 @@ class Scheduler:
                     self._push_title_change,
                     now=self._now,
                     acquire=acquire,
+                    push_cover=self._push_live_cover,
                 )
             elif sub.type == "dynamic":
                 poller = DynamicPoller(
@@ -302,6 +309,7 @@ class Scheduler:
                     self.retry_counts,
                     self._logger,
                     acquire=acquire,
+                    push_cover=self._push_dynamic_cover,
                 )
             elif sub.type == "collection":
                 poller = CollectionPoller(
@@ -315,6 +323,7 @@ class Scheduler:
                     self.retry_counts,
                     self._logger,
                     acquire=acquire,
+                    push_cover=self._push_collection_cover,
                 )
             if poller is not None:
                 pollers[sub.id] = poller

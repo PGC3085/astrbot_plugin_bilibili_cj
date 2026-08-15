@@ -64,6 +64,24 @@
                 "type": "bool",
                 "default": true,
                 "hint": "直播中若检测到标题变化，是否推送「改标题」通知"
+            },
+            "push_live_cover": {
+                "description": "开播推送携带封面图片",
+                "type": "bool",
+                "default": true,
+                "hint": "开播推送是否附带直播间封面（封面位于消息尾部）。部分平台（如飞书）图文混合消息存在兼容问题时，可关闭以仅推送文字"
+            },
+            "push_dynamic_cover": {
+                "description": "动态推送携带封面图片",
+                "type": "bool",
+                "default": true,
+                "hint": "动态推送是否附带封面图片。同上，平台图文兼容有问题时可关闭以仅推送文字"
+            },
+            "push_collection_cover": {
+                "description": "合集更新推送携带封面图片",
+                "type": "bool",
+                "default": true,
+                "hint": "合集更新推送是否附带视频封面。同上，平台图文兼容有问题时可关闭以仅推送文字"
             }
         }
     },

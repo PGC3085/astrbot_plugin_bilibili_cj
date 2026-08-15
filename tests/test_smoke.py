@@ -488,7 +488,7 @@ def test_full_chain_dynamic_flow(tmp_path) -> None:
             # 首轮 seed：两条旧动态静默标记，零推送。
             await poller.poll()
             assert context.sent == []
-            assert await db.get_seeded("dynamic_state", sub.id) is True
+            assert await db.get_seeded("dynamic_state_v2", sub.id) is True
 
             # 第二轮注入新动态 → 推送一次。
             repo.pages = [_page([_dyn_item(100, "新视频", desc="新视频正文")])]
@@ -540,7 +540,7 @@ def test_full_chain_collection_flow(tmp_path) -> None:
             # 首轮 seed：5 条 bvid 静默标记，零推送。
             await poller.poll()
             assert context.sent == []
-            assert await db.get_seeded("collection_state", sub.id) is True
+            assert await db.get_seeded("collection_state_v2", sub.id) is True
 
             # 追加一个新视频 → 推送一次。
             repo.items.append(_col_item(5, "新视频"))

@@ -143,6 +143,7 @@ def _make_poller(
     subscription: Subscription | None = None,
     push_title_change: bool = True,
     now: Callable[[], float] | None = None,
+    push_cover: bool = True,
 ) -> tuple[LivePoller, dict]:
     sub = subscription or _make_subscription()
     status: dict = {sub.id: SimpleNamespace(last_push_at=None, last_error=None)}
@@ -157,6 +158,7 @@ def _make_poller(
         context=context or FakeContext(),
         push_title_change=push_title_change,
         now=now if now is not None else lambda: float(_T0),
+        push_cover=push_cover,
     )
     return poller, status
 
@@ -584,5 +586,31 @@ def test_network_error_counted_no_crash_no_offline(tmp_path) -> None:
             assert repo.live_info_calls == 3  # 恢复轮再重解析 1
         finally:
             await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_live_payload_cover_gated_by_setting(tmp_path) -> None:
+    """push_cover=False 时开播载荷不携带封面；缺省 True 时携带。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        room = {
+            "room_id": 1,
+            "title": "标题",
+            "area_name": "游戏",
+            "live_start_time": _T0,
+            "cover": "https://example.com/cover.jpg",
+        }
+
+        poller_on, _ = _make_poller(FakeRepo(room=_room(0)), db)
+        payload = poller_on._live_payload(room)
+        assert payload["cover"] == "https://example.com/cover.jpg"
+
+        poller_off, _ = _make_poller(FakeRepo(room=_room(0)), db, push_cover=False)
+        payload = poller_off._live_payload(room)
+        assert "cover" not in payload
+        await db.close()
 
     asyncio.run(scenario())

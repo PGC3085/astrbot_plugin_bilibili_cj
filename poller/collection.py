@@ -41,8 +41,8 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
 _PAGE_SIZE: int = 20
 #: 推送全失败后的最大重试轮数，达上限后仍标记为已见并告警。
 _MAX_RETRY_ROUNDS: int = 3
-#: seed 标志所在持久化表（db.py 白名单含 collection_state）。
-_SEED_TABLE: str = "collection_state"
+#: seed 标志所在持久化表（v2 代标记：解析缺陷修复后强制重 seed，避免洪水推送）。
+_SEED_TABLE: str = "collection_state_v2"
 
 _logger: logging.Logger | None = None
 
@@ -82,6 +82,8 @@ class CollectionPoller:
         logger: 显式 logger；缺省用插件统一 logger。
         acquire: 每轮轮询开始前调用的异步取牌函数（调度器注入令牌桶，
             per-poll 限速）；缺省为无操作，行为不变。
+        push_cover: 是否在推送中携带封面图片（``poll.push_collection_cover``）；
+            部分平台（如飞书）图文混合消息存在兼容问题时关闭以仅推送文字。
     """
 
     def __init__(
@@ -98,6 +100,7 @@ class CollectionPoller:
         retry_counts: dict[str, dict[str, int]],
         logger: logging.Logger | None = None,
         acquire: Callable[[], Awaitable[None]] | None = None,
+        push_cover: bool = True,
     ) -> None:
         self.subscription = subscription
         self.repo = repo
@@ -110,6 +113,7 @@ class CollectionPoller:
         self._acquire: Callable[[], Awaitable[None]] = (
             acquire if acquire is not None else _noop_acquire
         )
+        self.push_cover = push_cover
         self._logger = logger if logger is not None else _get_logger()
 
     async def poll(self) -> None:
@@ -230,14 +234,17 @@ class CollectionPoller:
                 bvid,
             )
 
-    @staticmethod
     def _payload(
-        sub: Subscription, list_name: str, item: dict[str, Any]
+        self, sub: Subscription, list_name: str, item: dict[str, Any]
     ) -> dict[str, Any]:
-        """构造 collection 推送载荷（缺失键防御）。"""
+        """构造 collection 推送载荷（缺失键防御；封面按 push_cover 开关携带）。
+
+        封面位于载荷的 ``cover`` 字段，由 ``push.build_chain`` 追加到消息链
+        **尾部**（文字在前），规避部分平台图文顺序兼容问题。
+        """
         bvid = item.get("bvid", "")
         cover = item.get("pic")
-        return {
+        payload: dict[str, Any] = {
             "name": sub.name,
             "video_title": str(item.get("title", "")),
             "list_name": list_name,
@@ -245,5 +252,7 @@ class CollectionPoller:
                 item.get("pubdate", item.get("pub_time"))
             ),
             "url": f"https://www.bilibili.com/video/{bvid}",
-            "cover": str(cover) if cover else "",
         }
+        if self.push_cover and cover:
+            payload["cover"] = str(cover)
+        return payload

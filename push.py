@@ -160,6 +160,9 @@ def build_chain(event_type: str, payload: dict) -> Any:
     cover = payload.get("cover")
     if cover:
         try:
+            # 封面固定追加在消息链**尾部**（文字在前）：部分平台（如飞书）对
+            # 「文字+图片」混合消息链存在顺序兼容问题，尾部顺序可最大限度
+            # 保证文字与图片同时送达；仍不兼容时可经 poll.push_*_cover 关闭。
             image = Comp.Image.fromURL(str(cover))
             chain.chain.append(image)
         except Exception as exc:  # noqa: BLE001 - 封面失败必须降级而非中断推送

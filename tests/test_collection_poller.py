@@ -124,6 +124,7 @@ def _make_poller(
     retry_counts: dict | None = None,
     logger: logging.Logger | None = None,
     subscription: Subscription | None = None,
+    push_cover: bool = True,
 ) -> tuple[CollectionPoller, dict]:
     status: dict = {
         subscription.id if subscription else "sub-1": SimpleNamespace(
@@ -140,6 +141,7 @@ def _make_poller(
         status=status,
         retry_counts=retry_counts if retry_counts is not None else {},
         logger=logger,
+        push_cover=push_cover,
     )
     return poller, status
 
@@ -162,7 +164,7 @@ def test_seed_then_no_new_no_push(tmp_path) -> None:
         try:
             await poller.poll()
             assert context.sent == []  # seed 静默
-            assert await db.get_seeded("collection_state", "sub-1")
+            assert await db.get_seeded("collection_state_v2", "sub-1")
             await poller.poll()
             assert context.sent == []
             assert [c[3] for c in repo.calls] == [1, 2, 1, 2]  # 每轮 2 页
@@ -384,7 +386,7 @@ def test_empty_collection_no_push_no_error(tmp_path) -> None:
             await poller.poll()
             await poller.poll()
             assert context.sent == []
-            assert await db.get_seeded("collection_state", "sub-1")
+            assert await db.get_seeded("collection_state_v2", "sub-1")
         finally:
             await db.close()
 
@@ -408,7 +410,7 @@ def test_repo_network_error_swallowed(tmp_path) -> None:
             assert any("轮询失败" in r.getMessage() for r in records)
             await poller.poll()  # 恢复：正常 seed
             assert context.sent == []
-            assert await db.get_seeded("collection_state", "sub-1")
+            assert await db.get_seeded("collection_state_v2", "sub-1")
         finally:
             await db.close()
 
@@ -450,5 +452,26 @@ def test_cancelled_error_re_raised(tmp_path) -> None:
                 await poller.poll()
         finally:
             await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_collection_payload_cover_gated_by_setting(tmp_path) -> None:
+    """push_cover=False 时合集载荷不携带封面；缺省 True 时携带。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        item = _item(1)
+        sub = _make_subscription()
+
+        poller_on, _ = _make_poller(FakeRepo([]), db)
+        payload = poller_on._payload(sub, "测试合集", item)
+        assert payload["cover"] == item["pic"]
+
+        poller_off, _ = _make_poller(FakeRepo([]), db, push_cover=False)
+        payload = poller_off._payload(sub, "测试合集", item)
+        assert "cover" not in payload
+        await db.close()
 
     asyncio.run(scenario())

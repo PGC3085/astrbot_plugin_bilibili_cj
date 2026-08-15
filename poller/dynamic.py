@@ -46,8 +46,8 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
 _MAX_PAGES: int = 10
 #: 推送全失败后的最大重试轮数，达上限后仍标记为已见并告警。
 _MAX_RETRY_ROUNDS: int = 3
-#: seed 标志所在持久化表（db.py 白名单含 dynamic_state）。
-_SEED_TABLE: str = "dynamic_state"
+#: seed 标志所在持久化表（v2 代标记：解析缺陷修复后强制重 seed，避免洪水推送）。
+_SEED_TABLE: str = "dynamic_state_v2"
 #: 动态详情页链接模板（DDBOT DynamicUrl 同款，t.bilibili.com/<dynamic_id>）。
 _DYNAMIC_URL_TMPL: str = "https://t.bilibili.com/{}"
 #: 未知动态类型的通用文案。
@@ -233,6 +233,8 @@ class DynamicPoller:
         logger: 显式 logger；缺省用插件统一 logger。
         acquire: 每轮轮询开始前调用的异步取牌函数（调度器注入令牌桶，
             per-poll 限速）；缺省为无操作，行为不变。
+        push_cover: 是否在推送中携带封面图片（``poll.push_dynamic_cover``）；
+            部分平台（如飞书）图文混合消息存在兼容问题时关闭以仅推送文字。
     """
 
     def __init__(
@@ -249,6 +251,7 @@ class DynamicPoller:
         retry_counts: dict[str, dict[str, int]],
         logger: logging.Logger | None = None,
         acquire: Callable[[], Awaitable[None]] | None = None,
+        push_cover: bool = True,
     ) -> None:
         self.subscription = subscription
         self.repo = repo
@@ -262,6 +265,7 @@ class DynamicPoller:
             acquire if acquire is not None else _noop_acquire
         )
         self._logger = logger if logger is not None else _get_logger()
+        self.push_cover = push_cover
 
     async def poll(self) -> None:
         """执行一轮动态扫描；仓库/未知异常吞掉记日志，不向上抛出。
@@ -382,7 +386,7 @@ class DynamicPoller:
             "event_time": format_event_time(self._dynamic_timestamp(item)),
             "url": _DYNAMIC_URL_TMPL.format(dyn_id),
         }
-        if cover:
+        if self.push_cover and cover:
             payload["cover"] = cover
         return payload
 

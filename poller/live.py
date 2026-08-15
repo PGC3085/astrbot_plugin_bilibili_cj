@@ -86,6 +86,8 @@ class LivePoller:
         now: 时钟注入（可调用），测试用可控时钟。
         acquire: 每轮轮询开始前调用的异步取牌函数（调度器注入令牌桶，
             per-poll 限速）；缺省为无操作，行为不变。
+        push_cover: 是否在开播推送中携带直播间封面（``poll.push_live_cover``）；
+            部分平台（如飞书）图文混合消息存在兼容问题时关闭以仅推送文字。
     """
 
     def __init__(
@@ -101,6 +103,7 @@ class LivePoller:
         push_title_change: bool = True,
         now: Any = time.time,
         acquire: Callable[[], Awaitable[None]] | None = None,
+        push_cover: bool = True,
     ) -> None:
         self.subscription = subscription
         self.repo = repo
@@ -115,6 +118,7 @@ class LivePoller:
         self._acquire: Callable[[], Awaitable[None]] = (
             acquire if acquire is not None else _noop_acquire
         )
+        self.push_cover = push_cover
         self.error_count = 0
         self._suppress = False
         self._state_seen = False
@@ -358,14 +362,17 @@ class LivePoller:
     # -- 推送 -------------------------------------------------------------
 
     def _live_payload(self, room: dict[str, Any]) -> dict[str, Any]:
-        return {
+        """构造开播推送载荷（封面按 push_cover 开关携带，位于消息链尾部）。"""
+        payload: dict[str, Any] = {
             "name": self.subscription.name,
             "title": room["title"],
             "area_name": room["area_name"],
             "live_start_time": format_event_time(room["live_start_time"]),
             "url": self._room_url(int(room["room_id"])),
-            "cover": room["cover"],
         }
+        if self.push_cover and room.get("cover"):
+            payload["cover"] = room["cover"]
+        return payload
 
     async def _push_offline(self, sub: Subscription, state: Any) -> bool:
         now = self._now_int()

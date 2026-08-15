@@ -1,20 +1,59 @@
-# Python
+# ===== 凭据 / 敏感配置（防误传，最高优先级）=====
+# 插件目录内的真实批量配置文件（含 Cookie / 会话 ID），绝不上传
+config.json
+!config.example.json
+# 其它可能携带真实凭据/本地数据的 JSON 配置
+*_config.json
+!*_config.example.*
+!*_conf_schema.json
+
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
+dist/
+build/
+*.so
 
-# 测试 / 静态检查缓存
+# ===== 测试 / 静态检查缓存 =====
 .pytest_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pytype/
 
-# 测试运行产生的临时文件（tests/ 下的用例临时配置文件）
+# ===== 测试运行产生的临时文件 =====
 tests/tmp_*.json
+tests/*.db
+tests/*.sqlite*
 
-# 本地数据 / 环境
+# ===== 本地数据 / 环境 / 日志 =====
 data/
 .env
+.env.*
 *.log
+logs/
+*.db
+*.sqlite*
+state.db
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== 其它（构建 / 打包产物）=====
+*.whl
+*.tar.gz
+*.zip
+.pypirc

@@ -47,7 +47,14 @@ _LIVE_STATE_COLUMNS: Final = frozenset(
 )
 
 #: Tables holding per-subscription seed flags.
-_SEED_TABLES: Final = frozenset({"dynamic_state", "collection_state"})
+#
+# v1 表（``dynamic_state``/``collection_state``）是动态解析缺陷修复前的遗留
+# 标记：旧解析器在未写入任何去重记录时也会置位 seeded，修复后若沿用会造成
+# 「升级后洪水推送历史内容」。v2 表作为新一代种子标记，旧标记一律失效——
+# 历史部署升级后首轮会静默重 seed（记录当前可见内容、不推送），从而根治洪水。
+_SEED_TABLES: Final = frozenset(
+    {"dynamic_state", "collection_state", "dynamic_state_v2", "collection_state_v2"}
+)
 
 #: All tables carrying a sub_id column (used by delete_sub_state).
 _ALL_TABLES: Final = (
@@ -56,6 +63,8 @@ _ALL_TABLES: Final = (
     "live_state",
     "dynamic_state",
     "collection_state",
+    "dynamic_state_v2",
+    "collection_state_v2",
 )
 
 _DDL: Final = (
@@ -92,6 +101,14 @@ _DDL: Final = (
         seeded INTEGER
     )""",
     """CREATE TABLE IF NOT EXISTS collection_state (
+        sub_id TEXT PRIMARY KEY,
+        seeded INTEGER
+    )""",
+    """CREATE TABLE IF NOT EXISTS dynamic_state_v2 (
+        sub_id TEXT PRIMARY KEY,
+        seeded INTEGER
+    )""",
+    """CREATE TABLE IF NOT EXISTS collection_state_v2 (
         sub_id TEXT PRIMARY KEY,
         seeded INTEGER
     )""",

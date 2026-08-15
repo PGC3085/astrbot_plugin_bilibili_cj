@@ -135,6 +135,7 @@ def _make_poller(
     retry_counts: dict | None = None,
     logger: logging.Logger | None = None,
     subscription: Subscription | None = None,
+    push_cover: bool = True,
 ) -> tuple[DynamicPoller, dict]:
     status: dict = {
         subscription.id if subscription else "sub-1": SimpleNamespace(
@@ -151,6 +152,7 @@ def _make_poller(
         status=status,
         retry_counts=retry_counts if retry_counts is not None else {},
         logger=logger,
+        push_cover=push_cover,
     )
     return poller, status
 
@@ -190,7 +192,7 @@ def test_first_round_silent_then_push_new(tmp_path) -> None:
         try:
             await poller.poll()
             assert context.sent == []
-            assert await db.get_seeded("dynamic_state", "sub-1")
+            assert await db.get_seeded("dynamic_state_v2", "sub-1")
             repo.pages = [_page([_item(100, 8, title="新视频")])]
             await poller.poll()
             assert len(context.sent) == 1
@@ -293,7 +295,7 @@ def test_has_more_cap_warns_and_dedup_idempotent(tmp_path) -> None:
             await poller.poll()  # 再来一轮：旧项不重复、新项已见
             assert len(context.sent) == 1
             assert len(repo.calls) == 21
-            assert await db.get_seeded("dynamic_state", "sub-1")
+            assert await db.get_seeded("dynamic_state_v2", "sub-1")
         finally:
             await db.close()
 
@@ -380,7 +382,7 @@ def test_pagination_two_pages_six_items(tmp_path) -> None:
             ]
         )
         await db.set_seeded(
-            "dynamic_state", "sub-1", True
+            "dynamic_state_v2", "sub-1", True
         )  # 直接置 seed（等价空 seed）
         context = FakeContext()
         poller, _ = _make_poller(repo, db, context=context)
@@ -412,7 +414,7 @@ def test_empty_feed_no_push(tmp_path) -> None:
             await poller.poll()
             await poller.poll()
             assert context.sent == []
-            assert await db.get_seeded("dynamic_state", "sub-1")
+            assert await db.get_seeded("dynamic_state_v2", "sub-1")
         finally:
             await db.close()
 
@@ -436,7 +438,7 @@ def test_repo_network_error_swallowed(tmp_path) -> None:
             assert any("动态轮询失败" in r.getMessage() for r in records)
             await poller.poll()  # 恢复：正常 seed
             assert context.sent == []
-            assert await db.get_seeded("dynamic_state", "sub-1")
+            assert await db.get_seeded("dynamic_state_v2", "sub-1")
         finally:
             await db.close()
 
@@ -633,5 +635,55 @@ def test_polymer_av_dynamic_pushed_end_to_end(tmp_path) -> None:
             assert len(context.sent) == 1
         finally:
             await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_v1_seeded_state_reseeded_silently_no_flood(tmp_path) -> None:
+    """v1 解析缺陷留下的「seeded=1 但无去重记录」状态：升级后首轮静默重
+    seed（记录当前可见内容、不推送），第二轮仅推送真正新增的动态——根治
+    升级后的历史内容洪水推送。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        # 模拟缺陷时代的遗留状态：v1 表已置位，但 known_dynamics 为空
+        await db.set_seeded("dynamic_state", "sub-1", True)
+        repo = FakeRepo(
+            [_page([_item(100, 8, title="旧视频"), _item(101, 4, desc="旧文字")])]
+        )
+        context = FakeContext()
+        poller, _ = _make_poller(repo, db, context=context)
+        try:
+            await poller.poll()  # v2 未置位 → 静默重 seed，绝不推送历史
+            assert context.sent == []
+            assert await db.get_seeded("dynamic_state_v2", "sub-1") is True
+
+            repo.pages = [_page([_item(102, 8, title="新视频")])]
+            await poller.poll()  # 仅推送新的一条
+            assert len(context.sent) == 1
+            assert "新视频" in str(context.sent[0][1])
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_dynamic_payload_cover_gated_by_setting(tmp_path) -> None:
+    """push_cover=False 时动态载荷不携带封面；缺省 True 时携带。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        item = _item(100, 8, title="A", cover="https://example.com/c.jpg")
+
+        poller_on, _ = _make_poller(FakeRepo([_page([])]), db)
+        payload = poller_on._payload(poller_on.subscription, item, "100", 8)
+        assert payload["cover"] == "https://example.com/c.jpg"
+
+        poller_off, _ = _make_poller(FakeRepo([_page([])]), db, push_cover=False)
+        payload = poller_off._payload(poller_off.subscription, item, "100", 8)
+        assert "cover" not in payload
+        await db.close()
 
     asyncio.run(scenario())

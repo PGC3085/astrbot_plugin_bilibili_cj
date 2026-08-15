@@ -10,7 +10,10 @@
     "poll": {
         "global_min_interval_sec": 60,
         "poll_jitter_sec": 15,
-        "push_title_change": true
+        "push_title_change": true,
+        "push_live_cover": true,
+        "push_dynamic_cover": true,
+        "push_collection_cover": true
     },
     "webui": {
         "enabled": true,
