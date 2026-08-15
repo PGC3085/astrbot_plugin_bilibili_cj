@@ -1122,10 +1122,11 @@ class PluginLifecycle:
         return []
 
     def _log_subscriptions(self) -> None:
-        """把当前订阅清单与推送开关摘要打印到 AstrBot 控制台（启动时调用一次）。"""
-        summary = getattr(self.scheduler, "push_settings_summary", None)
-        if callable(summary):
-            self._logger.info("推送开关：%s", summary())
+        """把当前订阅清单打印到 AstrBot 控制台（启动时调用一次）。
+
+        推送开关摘要由 ``Scheduler._apply_poll_settings`` 在初始化与配置变更
+        重建时打印（变更才打），此处不再重复。
+        """
         subs = self.current_subscriptions()
         if not subs:
             self._logger.info("当前没有有效订阅（subscriptions 为空或全部被过滤）。")

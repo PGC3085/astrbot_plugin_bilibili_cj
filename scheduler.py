@@ -225,6 +225,8 @@ class Scheduler:
         self._push_dynamic_cover = True
         self._push_collection_cover = True
         self._push_dynamic_live_share = False
+        #: 最近一次打印过的推送开关摘要（变更时打印，供面板保存后即时确认）。
+        self._last_push_summary: str | None = None
         self._apply_poll_settings(poll_settings)
 
         self._bucket = self._new_bucket()
@@ -262,6 +264,10 @@ class Scheduler:
         self._push_dynamic_live_share = coerce_bool(
             settings.get("push_dynamic_live_share"), False
         )
+        summary = self.push_settings_summary()
+        if summary != self._last_push_summary:
+            self._last_push_summary = summary
+            self._logger.info("推送开关：%s", summary)
 
     def push_settings_summary(self) -> str:
         """返回推送开关摘要（启动日志与排查用）。"""

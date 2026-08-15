@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -863,3 +864,54 @@ def test_push_cover_flag_reaches_dynamic_poller() -> None:
     )
     pollers = scheduler._build_pollers()
     assert pollers["dyn-1"].push_cover is False
+
+
+def test_push_settings_change_logged_on_change_only() -> None:
+    """推送开关变更时打印摘要；相同设置重复应用时不重复打印。"""
+
+    class _Rec(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[logging.LogRecord] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record)
+
+    logger = logging.getLogger("test_scheduler.settings_log")
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+    handler = _Rec()
+    logger.addHandler(handler)
+    try:
+        scheduler = Scheduler(
+            subscriptions=[_live_sub("live-1", 10086, interval=60)],
+            credential_cfg={},
+            repo=object(),
+            db=None,
+            build_chain=build_chain,
+            send=send,
+            context=FakeContext(),
+            status={},
+            retry_counts={},
+            logger=logger,
+            poll_settings={"push_dynamic_cover": False},
+        )
+        summaries = [
+            r.getMessage() for r in handler.records if "推送开关" in r.getMessage()
+        ]
+        assert len(summaries) == 1  # 初始化打印一次
+        assert "动态封面=关" in summaries[0]
+
+        scheduler._apply_poll_settings({"push_dynamic_cover": False})
+        assert (
+            len([r for r in handler.records if "推送开关" in r.getMessage()]) == 1
+        )  # 未变更不重复打印
+
+        scheduler._apply_poll_settings({"push_dynamic_cover": True})
+        summaries = [
+            r.getMessage() for r in handler.records if "推送开关" in r.getMessage()
+        ]
+        assert len(summaries) == 2  # 变更后再次打印
+        assert "动态封面=开" in summaries[-1]
+    finally:
+        logger.removeHandler(handler)
