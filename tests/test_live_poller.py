@@ -313,7 +313,7 @@ def test_offline_two_strikes_push_once_with_duration(tmp_path) -> None:
             session, chain = context.sent[1]
             assert session == _SESSION
             assert "【B站下播】" in str(chain)
-            assert "时长：3600" in str(chain)
+            assert "时长：1小时" in str(chain)
             assert "https://live.bilibili.com/1" in str(chain)
             await poller.poll()  # 0（3/3）：同一离线期不重复推
             assert len(context.sent) == 2
@@ -402,7 +402,7 @@ def test_restart_continuity_suppression_and_arming(tmp_path) -> None:
             await poller_b.poll()
             await poller_b.poll()
             assert len(context_b.sent) == 1
-            assert "时长：1800" in str(context_b.sent[0][1])
+            assert "时长：30分" in str(context_b.sent[0][1])
         finally:
             await db.close()
 

@@ -104,7 +104,8 @@ def text_for(event_type: str, payload: dict) -> str:
         payload: Event payload. Required keys per event type (placeholders
             match template placeholders, missing keys render as ``""``):
             - ``live_on``: name, title, area_name, live_start_time, url.
-            - ``live_off``: name, duration, url.
+            - ``live_off``: name, duration, event_time, url. ``duration`` 为
+              :func:`format_duration` 预格式化的可读时长（``3小时2分26秒``）。
             - ``live_title``: name, old_title, new_title, url.
             - ``dynamic``: name, action, body, event_time, url. ``action`` 为
               动作短语（含尾部冒号，如 ``发布了新动态：``），``body`` 为
@@ -217,6 +218,36 @@ def format_event_time(timestamp: Any) -> str:
         return datetime.fromtimestamp(ts, tz=_EVENT_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except (OSError, OverflowError, ValueError):
         return ""
+
+
+def format_duration(seconds: Any) -> str:
+    """把秒数格式化为可读时长 ``X小时Y分Z秒``（零值单位省略）。
+
+    下播推送的「时长」用本函数预格式化（模板为纯 ``str.format``，无法在
+    模板内换算），避免用户收到 ``时长：10946`` 这种原始秒数。
+
+    Args:
+        seconds: 秒数（int/float/数字字符串均可）。
+
+    Returns:
+        ``X小时Y分Z秒`` 形式的可读时长；非法/非正值返回空串。
+    """
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}小时")
+    if minutes:
+        parts.append(f"{minutes}分")
+    if secs or not parts:
+        parts.append(f"{secs}秒")
+    return "".join(parts)
 
 
 async def send(

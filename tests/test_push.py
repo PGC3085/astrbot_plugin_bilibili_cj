@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import Subscription
-from push import format_event_time, send, text_for
+from push import format_duration, format_event_time, send, text_for
 
 #: 与 push._EVENT_TZ 保持一致的测试时区（UTC+8）。
 _TZ = timezone(timedelta(hours=8))
@@ -33,6 +33,19 @@ def test_format_event_time_invalid_returns_empty() -> None:
     assert format_event_time("abc") == ""
     assert format_event_time(0) == ""
     assert format_event_time(-1) == ""
+
+
+def test_format_duration_readable() -> None:
+    """秒数 → 可读时长（零值单位省略），非法/非正值返回空串。"""
+    assert format_duration(10946) == "3小时2分26秒"
+    assert format_duration(3600) == "1小时"
+    assert format_duration(1800) == "30分"
+    assert format_duration(45) == "45秒"
+    assert format_duration("3661") == "1小时1分1秒"
+    assert format_duration(0) == ""
+    assert format_duration(-5) == ""
+    assert format_duration(None) == ""
+    assert format_duration("abc") == ""
 
 
 def test_live_on_template_renders_start_time() -> None:
@@ -55,12 +68,13 @@ def test_live_off_template_renders_event_time() -> None:
         "live_off",
         {
             "name": "主播",
-            "duration": 3600,
+            "duration": format_duration(10946),
             "event_time": "2023-11-14 22:13:20",
             "url": "https://live.bilibili.com/1",
         },
     )
     assert "【B站下播】" in text
+    assert "时长：3小时2分26秒" in text
     assert "下播时间：2023-11-14 22:13:20" in text
 
 

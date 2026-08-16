@@ -445,7 +445,7 @@ def test_full_chain_live_flow(tmp_path) -> None:
             session, chain = context.sent[1]
             assert session == _SESSION
             assert "【B站下播】" in chain
-            assert "时长：3600" in chain
+            assert "时长：1小时" in chain
             assert "https://live.bilibili.com/1" in chain
             await poller.poll()  # 同一离线期不重复推
             assert len(context.sent) == 2

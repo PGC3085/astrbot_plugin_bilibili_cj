@@ -61,7 +61,7 @@ try:
         normalize,
         validate_session,
     )
-    from ..push import format_event_time
+    from ..push import format_duration, format_event_time
 except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本）
     import util  # type: ignore[import-not-found]
     from config import (  # type: ignore[import-not-found]
@@ -72,7 +72,7 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
         normalize,
         validate_session,
     )
-    from push import format_event_time  # type: ignore[import-not-found]
+    from push import format_duration, format_event_time  # type: ignore[import-not-found]
 
 #: /api/logs 环形缓冲容量（条）。
 _LOG_RING_MAX = 500
@@ -693,7 +693,7 @@ class WebUIServer:
         if event_type == "live_off":
             return {
                 "name": "测试主播",
-                "duration": 3600,
+                "duration": format_duration(3600),
                 "event_time": now,
                 "url": "https://live.bilibili.com/1",
             }
