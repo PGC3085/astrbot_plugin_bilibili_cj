@@ -3,8 +3,8 @@
 职责：
 
 - 首轮静默 seed：从 ``pn=1`` 全量翻页（``ps=20``；合集有限，翻到
-  ``len(page) < ps`` 或空页即止，无页数上限），把每个 bvid 写入
-  ``known_videos``（静默标记，不推送），并把 seed 标志持久化到
+  ``len(page) < ps`` 或空页即止，另设 :data:`_MAX_PAGES` 页数上限防失控），
+  把每个 bvid 写入 ``known_videos``（静默标记，不推送），并把 seed 标志持久化到
   ``collection_state.seeded``——重启恢复，避免空合集每轮重 seed 吞掉
   新视频、或重启吞掉停机期新视频。
 - seed 后每轮同样从 ``pn=1`` 全量扫描，逐页处理**所有**未知 bvid（不因
@@ -41,6 +41,9 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
 
 #: 每页拉取条数（计划规定 ps=20）。
 _PAGE_SIZE: int = 20
+#: 单轮扫描的页数上限（防失控：ps=20 × 50 页 = 1000 条，远超实际合集规模；
+#: 触上限记告警停止翻页，避免超大/异常合集每轮全量翻页造成请求风暴触发风控）。
+_MAX_PAGES: int = 50
 #: 推送全失败后的最大重试轮数，达上限后仍标记为已见并告警。
 _MAX_RETRY_ROUNDS: int = 3
 #: seed 标志所在持久化表（v2 代标记：解析缺陷修复后强制重 seed，避免洪水推送）。
@@ -161,7 +164,9 @@ class CollectionPoller:
     ) -> list[tuple[str, list[dict[str, Any]]]]:
         """从 pn=1 全量翻页拉取（ps=20），返回 ``(list_name, items)`` 列表。
 
-        合集有限：``len(items) < ps``、空页或响应缺 ``archives`` 即停止。
+        合集有限：``len(items) < ps``、空页或响应缺 ``archives`` 即停止；另设
+        :data:`_MAX_PAGES` 页数上限防失控（超大/异常合集每轮全量翻页会引发
+        请求风暴触发风控 -412），触上限记告警并停止。
         """
         pages: list[tuple[str, list[dict[str, Any]]]] = []
         pn = 1
@@ -176,6 +181,15 @@ class CollectionPoller:
                 break
             pages.append((list_name, archives))
             if len(archives) < _PAGE_SIZE:
+                break
+            if pn >= _MAX_PAGES:
+                self._logger.warning(
+                    "合集扫描已达 %d 页上限，停止翻页（可能为超大合集，"
+                    "超出部分的新视频本轮不检测）: sub=%s list_id=%s",
+                    _MAX_PAGES,
+                    sub.name,
+                    sub.list_id,
+                )
                 break
             pn += 1
         return pages
@@ -245,7 +259,7 @@ class CollectionPoller:
         cover = item.get("pic")
         payload: dict[str, Any] = {
             "name": sub.name,
-            "video_title": str(item.get("title", "")),
+            "video_title": str(item.get("title") or ""),
             "list_name": list_name,
             "publish_time": format_event_time(
                 item.get("pubdate", item.get("pub_time"))

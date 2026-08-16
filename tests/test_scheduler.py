@@ -867,6 +867,33 @@ def test_push_cover_flag_reaches_dynamic_poller() -> None:
     assert pollers["dyn-1"].push_cover is False
 
 
+def test_poll_settings_non_finite_fall_back_to_defaults() -> None:
+    """手改配置写入 inf/nan → 回退默认值（否则 sleep(inf) 让轮询任务永久挂起）。"""
+
+    scheduler = Scheduler(
+        subscriptions=[_live_sub("live-1", 10086, interval=60)],
+        credential_cfg={},
+        repo=object(),
+        db=None,
+        build_chain=build_chain,
+        send=send,
+        context=FakeContext(),
+        status={},
+        retry_counts={},
+        poll_settings={
+            "global_min_interval_sec": float("inf"),
+            "poll_jitter_sec": float("nan"),
+        },
+    )
+    assert scheduler._global_min == 60.0
+    assert scheduler._jitter == 0.0
+    scheduler._apply_poll_settings(
+        {"global_min_interval_sec": float("-inf"), "poll_jitter_sec": float("inf")}
+    )
+    assert scheduler._global_min == 60.0
+    assert scheduler._jitter == 0.0
+
+
 def test_push_settings_change_logged_on_change_only() -> None:
     """推送开关变更时打印摘要；相同设置重复应用时不重复打印。"""
 

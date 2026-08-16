@@ -22,7 +22,9 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
 
 #: 插件配置文件文件名（AstrBot 约定：``<plugin 根目录名>_config.json``）。
 _CONFIG_FILE_NAME: str = "astrbot_plugin_bilibili_cj_config.json"
-#: 插件目录内的批量配置文件名：存在时启动读入并合并到 AstrBot 配置（便于大规模设置）。
+#: 插件目录内的批量配置文件名：仅当**现有配置无有效订阅**（首次部署）时
+#: 由 lifecycle.create 读入并深度合并到 AstrBot 配置（便于大规模初始设置）；
+#: 已有订阅时不合并，避免重启时覆盖用户在面板/WebUI 中的修改。
 _BUNDLED_CONFIG_NAME: str = "config.json"
 
 #: ``_conf_schema.json`` 各类型缺省 ``default`` 字段时的回退值（与 AstrBotConfig 同语义）。

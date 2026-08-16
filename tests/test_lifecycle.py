@@ -490,3 +490,16 @@ def test_sessdata_present_no_warning() -> None:
         assert all("sessdata" not in message for message in warnings_)
 
     asyncio.run(_case())
+
+
+def test_webui_enabled_string_false_respected() -> None:
+    """手改配置 webui.enabled="false" → 正确判定禁用（不再 bool("false")==True）。"""
+
+    config = _make_config()
+    config["webui"]["enabled"] = "false"
+    harness = LifecycleHarness(config)
+    assert harness.lifecycle._webui_enabled() is False
+    config["webui"]["enabled"] = "true"
+    assert harness.lifecycle._webui_enabled() is True
+    config["webui"]["enabled"] = False
+    assert harness.lifecycle._webui_enabled() is False

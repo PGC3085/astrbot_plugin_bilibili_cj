@@ -51,8 +51,10 @@ class _SchedulerWithLogin:
     ) -> None:
         self._result = result
         self._error = error
+        self.calls = 0
 
     async def check_login(self) -> dict[str, Any] | None:
+        self.calls += 1
         if self._error is not None:
             raise self._error
         return self._result
@@ -266,6 +268,42 @@ def test_login_monitor_defaults_when_absent() -> None:
     assert lifecycle._login_monitor_enabled() is True
     assert lifecycle._login_monitor_interval() == 3600
     assert lifecycle._login_monitor_threshold() == 3
+
+
+def test_login_monitor_interval_non_finite_falls_back() -> None:
+    """interval_sec 为 inf/nan（手改配置）→ 回退默认值，监控任务不被永久挂起。"""
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        lifecycle = _make_monitor_lifecycle(
+            object(),
+            _FakeContext(),
+            {"interval_sec": bad},
+            logging.getLogger("test_credentials.nonfinite"),
+        )
+        assert lifecycle._login_monitor_interval() == 3600
+
+
+def test_login_monitor_skips_check_without_sessdata() -> None:
+    """配置中无 sessdata（匿名模式）→ 监控任务空转，不调用 check_login。"""
+
+    async def scenario() -> None:
+        logger, _handler = _make_logger("test_credentials.anon_monitor")
+        scheduler = _SchedulerWithLogin({"uname": "u", "mid": 1})
+        context = _FakeContext()
+        lifecycle = _make_monitor_lifecycle(
+            scheduler,
+            context,
+            {"enabled": True, "interval_sec": 60},
+            logger,
+        )
+        lifecycle._start_login_monitor()  # 配置无 credential → 匿名空转
+        await asyncio.sleep(0)
+        assert scheduler.calls == 0
+        task = lifecycle._login_monitor_task
+        assert task is not None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 # --------------------------------------------------------------------------

@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from types import SimpleNamespace
@@ -239,18 +240,25 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def _apply_poll_settings(self, poll_settings: dict[str, Any] | None) -> None:
-        """应用 poll 设置（数值在 config.normalize 已钳制，此处再防御）。"""
+        """应用 poll 设置（数值在 config.normalize 已钳制，此处再防御）。
+
+        NaN/inf 手改配置值防御：``max(1.0, nan)`` 虽返回 1.0，但 ``inf`` 会
+        穿透钳制——``sleep(inf)`` 让订阅轮询任务永久挂起；这里对非有限数值
+        统一回退默认值（normalize 同样钳制，双保险）。
+        """
         settings = poll_settings or {}
         raw_min = settings.get("global_min_interval_sec", 60)
         raw_jitter = settings.get("poll_jitter_sec", 0)
         try:
-            self._global_min = max(1.0, float(raw_min))
+            min_value = float(raw_min)
         except (TypeError, ValueError):
-            self._global_min = 60.0
+            min_value = 60.0
+        self._global_min = max(1.0, min_value) if math.isfinite(min_value) else 60.0
         try:
-            self._jitter = max(0.0, float(raw_jitter))
+            jitter_value = float(raw_jitter)
         except (TypeError, ValueError):
-            self._jitter = 0.0
+            jitter_value = 0.0
+        self._jitter = max(0.0, jitter_value) if math.isfinite(jitter_value) else 0.0
         self._push_title_change = coerce_bool(settings.get("push_title_change"), True)
         self._push_live_cover = coerce_bool(settings.get("push_live_cover"), True)
         self._push_dynamic_cover = coerce_bool(settings.get("push_dynamic_cover"), True)

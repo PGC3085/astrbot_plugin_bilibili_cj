@@ -89,7 +89,7 @@ var toastTimer = null;
 function toast(msg, kind) {
   var el = $('#toast');
   el.textContent = msg;
-  el.className = 'toast' + (kind ? ' show' : ' show');
+  el.className = 'toast show';
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(function () {
     el.classList.remove('show');

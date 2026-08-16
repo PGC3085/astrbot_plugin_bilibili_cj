@@ -151,6 +151,86 @@ def test_short_text_unaffected_by_url_reappend() -> None:
     assert "短内容" in text
 
 
+def test_build_chain_empty_images_falls_back_to_cover(monkeypatch) -> None:
+    """``images`` 为空列表时回退单封面 ``cover``（不丢图）。"""
+
+    import push as push_mod
+
+    captured: list[str] = []
+
+    class _FakeImage:
+        @staticmethod
+        def fromURL(url: str) -> str:
+            return f"IMG:{url}"
+
+    class _FakeComp:
+        Image = _FakeImage
+
+    class _FakeChain:
+        def __init__(self) -> None:
+            self.chain = captured
+
+        def message(self, text: str) -> "_FakeChain":
+            captured.append(f"TEXT:{text}")
+            return self
+
+    monkeypatch.setattr(push_mod, "_ASTRBOT_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "MessageChain", _FakeChain)
+    monkeypatch.setattr(push_mod, "Comp", _FakeComp)
+    push_mod.build_chain(
+        "live_on",
+        {
+            "name": "主播",
+            "title": "标题",
+            "area_name": "分区",
+            "live_start_time": "2023-11-14 22:13:20",
+            "url": "https://live.bilibili.com/1",
+            "images": [],
+            "cover": "https://example.com/c.jpg",
+        },
+    )
+    assert "IMG:https://example.com/c.jpg" in captured
+
+
+def test_build_chain_cover_missing_no_image(monkeypatch) -> None:
+    """无 images 且无 cover → 纯文本链，不附加图片。"""
+
+    import push as push_mod
+
+    captured: list[str] = []
+
+    class _FakeImage:
+        @staticmethod
+        def fromURL(url: str) -> str:
+            return f"IMG:{url}"
+
+    class _FakeComp:
+        Image = _FakeImage
+
+    class _FakeChain:
+        def __init__(self) -> None:
+            self.chain = captured
+
+        def message(self, text: str) -> "_FakeChain":
+            captured.append(f"TEXT:{text}")
+            return self
+
+    monkeypatch.setattr(push_mod, "_ASTRBOT_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "MessageChain", _FakeChain)
+    monkeypatch.setattr(push_mod, "Comp", _FakeComp)
+    push_mod.build_chain(
+        "live_on",
+        {
+            "name": "主播",
+            "title": "标题",
+            "area_name": "分区",
+            "live_start_time": "2023-11-14 22:13:20",
+            "url": "https://live.bilibili.com/1",
+        },
+    )
+    assert all(not item.startswith("IMG:") for item in captured)
+
+
 def test_send_logs_per_session_results() -> None:
     """``push.send`` 逐会话记录推送结果日志（成功 info / 失败 warning）。"""
 

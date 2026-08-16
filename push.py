@@ -160,7 +160,8 @@ def build_chain(event_type: str, payload: dict) -> Any:
         return text
     chain = MessageChain().message(text)
     image_urls = payload.get("images")
-    if not isinstance(image_urls, (list, tuple)):
+    if not isinstance(image_urls, (list, tuple)) or not image_urls:
+        # 空列表/缺省统一回退单封面：images 为空时不应丢弃 cover。
         cover = payload.get("cover")
         image_urls = (str(cover),) if cover else ()
     for raw_url in image_urls:

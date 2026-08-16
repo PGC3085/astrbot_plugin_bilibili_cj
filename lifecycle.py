@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -147,25 +148,39 @@ class PluginLifecycle:
             else config_file._default_config_path()
         )
         config_file.ensure_config_file(resolved_path, logger=logger)
-        # 批量配置：插件目录存在 config.json 时读入并深度合并到 AstrBot 配置，
-        # 便于大规模设置订阅（合并后落盘，保证面板 / 热重载 / WebUI 一致）。
-        bundled = config_file._bundled_config_path()
-        if bundled is not None:
-            data = config_file.read_config_file(bundled, logger)
-            if data is not None:
-                config_file._deep_merge(config, data)
-                saver = getattr(config, "save_config", None)
-                if callable(saver):
-                    try:
-                        saver()
-                    except Exception as exc:  # noqa: BLE001 - 落盘失败不阻断启动
-                        logger.warning("批量配置落盘失败: %s", exc)
-                logger.info("已读入插件目录批量配置文件 %s 并合并到配置", bundled)
         raw = cls._config_raw(config)
         poll = raw.get("poll")
         if isinstance(poll, dict):
             raw["poll"] = dict(poll)  # normalize 就地钳制：勿动持久配置的 poll 组
         subscriptions = normalize(raw)
+        # 批量配置：仅当**现有配置没有有效订阅**时（首次部署语义）读入插件
+        # 目录的 config.json 并深度合并；已有订阅说明用户已开始管理配置，
+        # 重启时不再合并——否则插件目录里的旧 config.json 会在每次启动时
+        # 静默覆盖用户在面板/WebUI 中的修改。
+        bundled = config_file._bundled_config_path()
+        if bundled is not None:
+            if subscriptions:
+                logger.info(
+                    "已有 %d 条订阅，跳过插件目录批量配置合并（避免覆盖用户配置）",
+                    len(subscriptions),
+                )
+            else:
+                data = config_file.read_config_file(bundled, logger)
+                if data is not None:
+                    config_file._deep_merge(config, data)
+                    saver = getattr(config, "save_config", None)
+                    if callable(saver):
+                        try:
+                            saver()
+                        except Exception as exc:  # noqa: BLE001 - 落盘失败不阻断启动
+                            logger.warning("批量配置落盘失败: %s", exc)
+                    logger.info("已读入插件目录批量配置文件 %s 并合并到配置", bundled)
+                    # 合并后重解析：批量配置里的凭据/订阅/轮询设置立即生效。
+                    raw = cls._config_raw(config)
+                    poll = raw.get("poll")
+                    if isinstance(poll, dict):
+                        raw["poll"] = dict(poll)
+                    subscriptions = normalize(raw)
         credential_raw = raw.get("credential")
         credential_cfg: dict[str, Any] = (
             dict(credential_raw) if isinstance(credential_raw, dict) else {}
@@ -283,13 +298,19 @@ class PluginLifecycle:
         return coerce_bool(self._login_monitor_cfg().get("enabled"), True)
 
     def _login_monitor_interval(self) -> float:
-        """登录校验间隔（秒），钳制到 :data:`_LOGIN_MONITOR_MIN_INTERVAL` 以上。"""
+        """登录校验间隔（秒），钳制到 :data:`_LOGIN_MONITOR_MIN_INTERVAL` 以上。
+
+        NaN/inf 等非有限数值（手改配置可写入）一律回退默认值——``sleep(inf)``
+        会让监控任务永久挂起、再也不会校验登录状态。
+        """
         raw = self._login_monitor_cfg().get("interval_sec")
         try:
             interval = (
                 float(raw) if raw is not None else _LOGIN_MONITOR_DEFAULT_INTERVAL
             )
         except (TypeError, ValueError):
+            interval = _LOGIN_MONITOR_DEFAULT_INTERVAL
+        if not math.isfinite(interval):
             interval = _LOGIN_MONITOR_DEFAULT_INTERVAL
         return max(float(_LOGIN_MONITOR_MIN_INTERVAL), interval)
 
@@ -304,10 +325,19 @@ class PluginLifecycle:
             threshold = _LOGIN_MONITOR_DEFAULT_THRESHOLD
         return max(_LOGIN_MONITOR_MIN_THRESHOLD, threshold)
 
+    def _credential_from_config(self) -> dict[str, Any]:
+        """读取当前配置中的 B 站凭据（运行时通过 WebUI/面板补填 Cookie 后
+        也能读到最新值；``_credential_cfg`` 仅是 create() 时刻的快照）。"""
+        raw = self._config_raw(self.config)
+        credential = raw.get("credential")
+        return dict(credential) if isinstance(credential, dict) else {}
+
     def _start_login_monitor(self) -> None:
-        """启动登录状态监控任务（幂等；无 sessdata 或已关闭时不启动）。"""
-        if not (self._credential_cfg.get("sessdata") or ""):
-            return
+        """启动登录状态监控任务（幂等；``enabled=false`` 时不启动）。
+
+        凭据存在性在**循环内**逐轮检查（读当前配置）：匿名模式下任务空转
+        等待，运行时补填 Cookie 并保存后监控自动开始校验，无需重载插件。
+        """
         if not self._login_monitor_enabled():
             return
         if self._login_monitor_task is None or self._login_monitor_task.done():
@@ -319,12 +349,16 @@ class PluginLifecycle:
         """周期性校验 B 站登录状态；连续失败达阈值时通知指定会话。
 
         首次进入立即校验一次，之后每 ``interval_sec`` 校验一次；失败累计连续
-        次数、达阈值时发送告警；成功后清零并记录通过时间。每轮重读配置，
-        关闭监控（``enabled=false``）后自然退出。
+        次数、达阈值时发送告警；成功后清零并记录通过时间。每轮重读配置：
+        关闭监控（``enabled=false``）后自然退出；未配置 sessdata 时跳过本轮
+        校验（空转等待，补填 Cookie 后自动恢复）。
         """
         while True:
             if not self._login_monitor_enabled():
                 return
+            if not (self._credential_from_config().get("sessdata") or ""):
+                await self._sleep(self._login_monitor_interval())
+                continue
             try:
                 await self._check_login_once()
             except asyncio.CancelledError:
@@ -492,8 +526,8 @@ class PluginLifecycle:
         return dict(webui) if isinstance(webui, dict) else {}
 
     def _webui_enabled(self) -> bool:
-        """是否启用 WebUI（schema 缺省 true）。"""
-        return bool(self._webui_config().get("enabled", False))
+        """是否启用 WebUI（schema 缺省 true；字符串 ``"false"`` 不再误判为开）。"""
+        return coerce_bool(self._webui_config().get("enabled"), True)
 
     def _webui_addr(self) -> tuple[str, int]:
         """解析 WebUI 监听地址；非法 port 回退 schema 缺省 8765。"""

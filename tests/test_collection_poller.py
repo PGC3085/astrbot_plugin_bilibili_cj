@@ -497,3 +497,43 @@ def test_collection_payload_cover_gated_by_setting(tmp_path) -> None:
         await db.close()
 
     asyncio.run(scenario())
+
+
+def test_fetch_page_cap_stops_and_warns(tmp_path, monkeypatch) -> None:
+    """页数上限：超大合集翻页到 _MAX_PAGES 即停并告警（防请求风暴触发风控）。"""
+
+    async def scenario() -> None:
+        monkeypatch.setattr("poller.collection._MAX_PAGES", 3)
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        repo = FakeRepo([_item(i) for i in range(100)])  # 5 个满页
+        logger, records = _recording_logger()
+        poller, _ = _make_poller(repo, db, logger=logger)
+        try:
+            await poller.poll()  # seed 阶段触上限停止翻页
+            assert [c[3] for c in repo.calls] == [1, 2, 3]
+            assert any("上限" in r.getMessage() for r in records)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_payload_title_missing_not_none_text(tmp_path) -> None:
+    """title 缺失时 video_title 为空串，不出现字面量 "None"。"""
+
+    async def scenario() -> None:
+        db = Database(tmp_path / "state.db")
+        await db.init()
+        poller, _ = _make_poller(FakeRepo([]), db)
+        try:
+            payload = poller._payload(
+                poller.subscription,
+                "测试合集",
+                {"bvid": "BV0001", "pubdate": 1_700_000_000},
+            )
+            assert payload["video_title"] == ""
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
