@@ -10,7 +10,7 @@ event loop 复用）。
 
 1. seed 静默写状态；2. 0→1 推开播（title/分区/url）；3.
 ``live_start_time==0`` 回退 now；4. 改标题（启用/禁用）；5.
-1→1→0×3 仅第 3 次 0 推下播（含时长）、不重复；6. 从未直播不推
+1→1→0×2 仅第 2 次 0 推下播（含时长）、不重复；6. 从未直播不推
 下播；7. status 2 视同未播；8. 重启抑制 + arming/counting 恢复；
 9. pending 重投成功后清空（当轮唯一推送）；10. pending 达上限丢弃
 并告警；11. pending 相反转移清除（复播不推陈旧下播）；12. pending
@@ -287,8 +287,8 @@ def test_title_change_not_pushed_when_disabled(tmp_path) -> None:
     asyncio.run(scenario())
 
 
-def test_offline_three_strikes_push_once_with_duration(tmp_path) -> None:
-    """5. 1→1→0×3：仅第 3 次 0 推"下播"（时长=now-last_live_time），不重复。"""
+def test_offline_two_strikes_push_once_with_duration(tmp_path) -> None:
+    """5. 1→1→0×2：仅第 2 次 0 推"下播"（时长=now-last_live_time），不重复。"""
 
     async def scenario() -> None:
         db = Database(tmp_path / "state.db")
@@ -306,18 +306,16 @@ def test_offline_three_strikes_push_once_with_duration(tmp_path) -> None:
             assert len(context.sent) == 1
             repo.room = _room(0)
             clock.tick(3600)
-            await poller.poll()  # 0（1/3）
-            await poller.poll()  # 0（2/3）
-            assert len(context.sent) == 1  # 前两次不推
-            clock.tick(3600)  # now = _T0 + 7200
-            assert await poller.poll() is True  # 0（3/3）→ 下播
+            await poller.poll()  # 0（1/2）
+            assert len(context.sent) == 1  # 首次不推（等复查确认）
+            assert await poller.poll() is True  # 0（2/2）→ 下播
             assert len(context.sent) == 2
             session, chain = context.sent[1]
             assert session == _SESSION
             assert "【B站下播】" in str(chain)
-            assert "时长：7200" in str(chain)
+            assert "时长：3600" in str(chain)
             assert "https://live.bilibili.com/1" in str(chain)
-            await poller.poll()  # 0（4/4）：同一离线期不重复推
+            await poller.poll()  # 0（3/3）：同一离线期不重复推
             assert len(context.sent) == 2
         finally:
             await db.close()
@@ -362,9 +360,8 @@ def test_status_2_treated_as_offline(tmp_path) -> None:
             repo.room = _room(1)
             assert await poller.poll() is True  # 2→1 开播
             repo.room = _room(2)
-            await poller.poll()  # 1→2（1/3）
-            await poller.poll()  # （2/3）
-            await poller.poll()  # （3/3）→ 下播
+            await poller.poll()  # 1→2（1/2）
+            await poller.poll()  # （2/2）→ 下播
             assert len(context.sent) == 2
             assert "【B站下播】" in str(context.sent[1][1])
         finally:
@@ -375,7 +372,7 @@ def test_status_2_treated_as_offline(tmp_path) -> None:
 
 def test_restart_continuity_suppression_and_arming(tmp_path) -> None:
     """8. 重建 poller：首轮观测到 status==1 时静默刷新、不推（含改标题）；
-    随后 0×3 仍推下播（arming/counting 从 DB 恢复）。"""
+    随后 0×2 仍推下播（arming/counting 从 DB 恢复）。"""
 
     async def scenario() -> None:
         db = Database(tmp_path / "state.db")
@@ -399,10 +396,9 @@ def test_restart_continuity_suppression_and_arming(tmp_path) -> None:
             assert state.last_title == "新标题"  # 静默刷新
             await poller_b.poll()  # 1→1 无变化
             assert context_b.sent == []
-            # 0×3 → 下播（arming 恢复；时长按静默刷新后的 last_live_time）
+            # 0×2 → 下播（arming 恢复；时长按静默刷新后的 last_live_time）
             repo.room = _room(0)
             clock.tick(1800)
-            await poller_b.poll()
             await poller_b.poll()
             await poller_b.poll()
             assert len(context_b.sent) == 1
@@ -485,10 +481,9 @@ def test_pending_offline_cleared_on_relive(tmp_path) -> None:
             await poller.poll()  # 开播成功
             repo.room = _room(0)
             clock.tick(3600)
-            await poller.poll()  # 0（1/3）
-            await poller.poll()  # 0（2/3）
+            await poller.poll()  # 0（1/2）
             context.ok = False
-            await poller.poll()  # 0（3/3）→ 下播失败 → pending{offline}
+            await poller.poll()  # 0（2/2）→ 下播失败 → pending{offline}
             state = await db.get_live_state("live-1")
             assert json.loads(state.pending_push)["kind"] == "offline"
             assert state.offline_notified == 1  # 首次尝试即置位（失败也置）

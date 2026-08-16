@@ -14,7 +14,8 @@
    旧任务取消、新 poller 构建、status/auto-disable 保留、clear_disabled 清空。
    6. 限速：per-poll 令牌（合集多页轮询不再页间阻塞）+ 桶容量 3 时第 4 个
    订阅阻塞（假 sleep 受控模式）。7. stop() 干净取消全部任务。8. 维护任务
-   每 6h 调一次 db.prune_old。
+   每 6h 调一次 db.prune_old。9. 下播确认中的快速复查（短间隔不等满轮询
+间隔）与 ``last_poll`` 在观测完成后写入。
 """
 
 from __future__ import annotations
@@ -915,3 +916,115 @@ def test_push_settings_change_logged_on_change_only() -> None:
         assert "动态封面=开" in summaries[-1]
     finally:
         logger.removeHandler(handler)
+
+
+# ----------------------------------------------------------------------
+# 10. 下播确认快速复查 + last_poll 观测后写入
+# ----------------------------------------------------------------------
+
+
+def test_offline_confirm_fast_recheck_shortens_delay() -> None:
+    """下播确认中按短间隔（15s）快速复查：下播推送不再等满完整轮询间隔。"""
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        sleep = AutoSleep(clock)
+        repo = LiveFakeRepo()
+        context = FakeContext()
+        scheduler, _ = _make_scheduler(
+            [_live_sub("live-1", 10086, interval=10)],
+            repo,
+            InstantDb(),
+            clock,
+            sleep,
+            poll_settings={"global_min_interval_sec": 1, "poll_jitter_sec": 0},
+            context=context,
+        )
+        scheduler.start()
+        await _drive(lambda: repo.room_info_calls >= 1)  # seed 完成
+        repo.room = _room(1)
+        await _drive(lambda: any("【B站开播】" in str(c[1]) for c in context.sent))
+        repo.room = _room(0)
+        await _drive(lambda: any("【B站下播】" in str(c[1]) for c in context.sent))
+        non_idle = sleep.non_idle()
+        assert 15.0 in non_idle  # 下播确认中的快速复查间隔出现
+        assert non_idle.count(10.0) >= 2  # seed/开播/常规轮次按完整间隔推进
+        assert len(context.sent) >= 2  # 开播 + 下播
+        await scheduler.stop()
+
+    asyncio.run(scenario())
+
+
+def test_last_poll_recorded_after_observation() -> None:
+    """status.last_poll 在观测完成之后写入（贴近真实轮询点，非轮询开始前）。"""
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        sleep = AutoSleep(clock)
+        repo = LiveFakeRepo()
+        wall: dict[str, str] = {"iso": "before"}
+
+        async def recording_room_info(room_id: int) -> dict:
+            del room_id
+            repo.room_info_calls += 1
+            wall["iso"] = "polled"  # 观测执行中打标记
+            return dict(_room(0))
+
+        repo.get_room_info = recording_room_info  # type: ignore[method-assign]
+        scheduler, status = _make_scheduler(
+            [_live_sub("live-1", 10086, interval=10)],
+            repo,
+            InstantDb(),
+            clock,
+            sleep,
+            poll_settings={"global_min_interval_sec": 1, "poll_jitter_sec": 0},
+        )
+        scheduler._now_iso = lambda: wall["iso"]
+        scheduler.start()
+        await _drive(lambda: repo.room_info_calls >= 2)
+        await _settle()
+        assert status["live-1"].last_poll == "polled"  # 观测完成后写入
+        await scheduler.stop()
+
+    asyncio.run(scenario())
+
+
+def test_live_awaiting_confirm_flag() -> None:
+    """_live_awaiting_confirm：观测到离线（计数≥1）且未通知 → True；
+    已通知/仍在直播/从未直播 → False。"""
+
+    def state(**fields: Any) -> Any:
+        base = SimpleNamespace(
+            last_status=None,
+            consecutive_offline_count=None,
+            offline_notified=None,
+        )
+        for key, value in fields.items():
+            setattr(base, key, value)
+        return base
+
+    assert Scheduler._live_awaiting_confirm(None) is False
+    assert (
+        Scheduler._live_awaiting_confirm(
+            state(last_status=0, consecutive_offline_count=1, offline_notified=0)
+        )
+        is True
+    )
+    assert (
+        Scheduler._live_awaiting_confirm(
+            state(last_status=0, consecutive_offline_count=1, offline_notified=1)
+        )
+        is False  # 已通知
+    )
+    assert (
+        Scheduler._live_awaiting_confirm(
+            state(last_status=1, consecutive_offline_count=0, offline_notified=0)
+        )
+        is False  # 仍在直播
+    )
+    assert (
+        Scheduler._live_awaiting_confirm(
+            state(last_status=0, consecutive_offline_count=0, offline_notified=0)
+        )
+        is False  # 从未直播
+    )

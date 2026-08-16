@@ -11,7 +11,9 @@
   按 ``max(poll_interval_sec, global_min_interval_sec) + uniform(0, jitter)``
   独立间隔执行，互不拖慢；连续失败指数退避（底数 2、上限 5min）；连续失败
   N=10 自动禁用（仅运行时，重启恢复）并向其全部会话推送告警；被禁用订阅
-  按自身间隔重查状态。
+  按自身间隔重查状态。直播订阅首次观测到离线后（下播确认中）按
+  :data:`_FAST_RECHECK_SEC` 短间隔**快速复查**，下播推送不再被完整轮询
+  间隔拖慢。
 - 错误信号：轮询前把 ``status[sub_id].last_error`` 置 None，轮询后非 None 即
   本轮出错（轮询器/推送失败都会写 last_error）；另以 ``poller.error_count``
   增量兜底（LivePoller 持有该属性）。dynamic/collection 的轮询错误同样经
@@ -61,6 +63,9 @@ _BACKOFF_MAX_SEC: float = 300.0
 _MAX_CONSECUTIVE_ERRORS: int = 10
 #: 维护任务周期（秒，6 小时）。
 _MAINTENANCE_INTERVAL_SEC: float = 6 * 3600.0
+#: 下播确认中的快速复查间隔（秒）：首次观测到离线后以此短间隔立即复查，
+#: 不再等满一个轮询间隔——大幅缩短「下播推送」的检测延迟。
+_FAST_RECHECK_SEC: float = 15.0
 
 
 class TokenBucket:
@@ -149,6 +154,8 @@ class Scheduler:
         sleep: 睡眠注入（可调用），测试用假 sleep（确定性推进假时钟）。
         rand: ``uniform(a, b)`` 注入，测试可替换；缺省 ``random.uniform``。
         loop: 预留 event loop 参数（未使用，保持签名兼容）。
+        now_iso: 墙钟 ISO 时间源注入（测试可替换）；缺省 ``util.now_iso``，
+            用于记录 ``last_poll``（观测完成时刻）。
     """
 
     def __init__(
@@ -168,6 +175,7 @@ class Scheduler:
         loop: Any = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         rand: Callable[[float, float], float] | None = None,
+        now_iso: Callable[[], str] | None = None,
     ) -> None:
         del loop  # 预留参数：scheduler 不依赖外部 loop
         self._subscriptions: list[Subscription] = list(subscriptions)
@@ -199,6 +207,12 @@ class Scheduler:
         )
         self._rand: Callable[[float, float], float] = (
             rand if rand is not None else random.uniform
+        )
+        #: 墙钟 ISO 时间源（``util.now_iso`` 或测试注入）；用于记录
+        #: ``last_poll`` = **观测完成时刻**（令牌桶等待与网络请求之后），
+        #: 保证 WebUI 的「上次轮询」贴近真实轮询点。
+        self._now_iso: Callable[[], str] = (
+            now_iso if now_iso is not None else util.now_iso
         )
         self._global_min = 60.0
         self._jitter = 0.0
@@ -457,45 +471,62 @@ class Scheduler:
 
         每轮先按 ``max(poll_interval_sec, global_min) + jitter`` 睡眠，再检查
         启用状态（enabled / 运行时自动禁用）决定是否轮询——被禁用的订阅也按
-        自身间隔重查，重新启用后无需重建即可恢复。``CancelledError`` 透传；
-        其余任何异常（含轮询后的账务逻辑）都记入错误计数并继续循环，绝不
-        让单个异常永久杀死该订阅的轮询任务。
+        自身间隔重查，重新启用后无需重建即可恢复。直播订阅在下播确认中
+        （首次观测到离线、尚未推送）按 :data:`_FAST_RECHECK_SEC` 短间隔立即
+        复查，不等待完整轮询间隔。``CancelledError`` 透传；其余任何异常
+        （含轮询后的账务逻辑）都记入错误计数并继续循环，绝不让单个异常
+        永久杀死该订阅的轮询任务。
         """
         while True:
             await self._sleep(self._interval_for(sub))
-            if not sub.enabled or self._is_auto_disabled(sub.id):
-                continue
-            poller = self.pollers.get(sub.id)
-            if poller is None:
-                continue
-            try:
-                await self._poll_one(sub, poller)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - 账务异常不允许杀死轮询任务
-                self._logger.error(
-                    "轮询任务异常（sub=%s），已记录并继续: %s",
-                    sub.name,
-                    exc,
-                    exc_info=True,
-                )
-                entry = self._ensure_status(sub.id)
-                await self._record_error(sub, entry)
+            while True:
+                if not sub.enabled or self._is_auto_disabled(sub.id):
+                    break
+                poller = self.pollers.get(sub.id)
+                if poller is None:
+                    break
+                try:
+                    errored = await self._poll_one(sub, poller)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 账务异常不允许杀死轮询任务
+                    self._logger.error(
+                        "轮询任务异常（sub=%s），已记录并继续: %s",
+                        sub.name,
+                        exc,
+                        exc_info=True,
+                    )
+                    entry = self._ensure_status(sub.id)
+                    await self._record_error(sub, entry)
+                    errored = True
+                if errored:
+                    break  # 出错轮次按退避节奏推进，不做快速复查
+                entry = self.status.get(sub.id)
+                if entry is None or not getattr(entry, "fast_recheck", False):
+                    break
+                # 下播确认中：短间隔立即复查（观测 → 推送的延迟不再叠加完整间隔）
+                await self._sleep(_FAST_RECHECK_SEC)
 
     def _interval_for(self, sub: Subscription) -> float:
         """订阅单轮间隔：``max(poll_interval_sec, global_min) + uniform(0, jitter)``。"""
         interval = max(float(sub.poll_interval_sec), self._global_min)
         return interval + self._rand(0.0, self._jitter)
 
-    async def _poll_one(self, sub: Subscription, poller: Any) -> None:
+    async def _poll_one(self, sub: Subscription, poller: Any) -> bool:
         """执行一轮轮询并维护 status：last_poll/错误计数/退避/自动禁用。
 
         错误信号：轮询前置 ``last_error`` 为 None，轮询/推送失败会立即重写
         （pollers 与 push.send 均写该字段），轮后非 None 即本轮出错；另以
         ``poller.error_count`` 增量兜底（LivePoller 持有）。
+
+        ``last_poll`` 在**观测完成之后**记录（令牌桶等待与网络请求之后），
+        贴近真实轮询时刻；直播订阅额外写 ``live_status`` 与 ``fast_recheck``
+        （下播确认中 → True，驱动 ``_run_sub`` 快速复查）。
+
+        Returns:
+            True 表示本轮出错（供 ``_run_sub`` 决定是否快速复查）。
         """
         entry = self._ensure_status(sub.id)
-        entry.last_poll = util.now_iso()
         entry.last_error = None
         errors_before = int(getattr(poller, "error_count", 0))
         try:
@@ -510,6 +541,7 @@ class Scheduler:
         else:
             errors_after = int(getattr(poller, "error_count", 0))
             errored = entry.last_error is not None or errors_after != errors_before
+        entry.last_poll = self._now_iso()
         if errored:
             await self._record_error(sub, entry)
         else:
@@ -521,6 +553,21 @@ class Scheduler:
                 if state is not None and state.last_status is not None
                 else None
             )
+            entry.fast_recheck = self._live_awaiting_confirm(state)
+        return errored
+
+    @staticmethod
+    def _live_awaiting_confirm(state: Any) -> bool:
+        """直播订阅是否处于「下播确认中」：已观测到离线（计数≥1）但尚未推送。
+
+        此时调度器按 :data:`_FAST_RECHECK_SEC` 短间隔立即复查，下播推送的
+        延迟不再叠加完整轮询间隔（此前 3 连漏判 × 轮询间隔可达数分钟）。
+        """
+        if state is None or state.offline_notified:
+            return False
+        if int(state.last_status or 0) not in (0, 2):
+            return False
+        return int(state.consecutive_offline_count or 0) >= 1
 
     async def _record_error(self, sub: Subscription, entry: Any) -> None:
         """累计错误计数；连续失败达 N 次自动禁用，否则指数退避睡眠。"""

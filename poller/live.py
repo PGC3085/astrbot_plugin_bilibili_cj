@@ -4,9 +4,10 @@ live_status 0=未播/1=直播/2=轮播（2 视同未播）；room_id 首次经
 ``get_live_info(uid).live_room.roomid`` 解析并缓存到 ``live_state.room_id``，
 仅 roomid==0/失败时重解析（roomid==0 时跳过 get_room_info、按未播处理）。
 首轮静默 seed；0/2→1 推"开播"并重置离线计数/offline_notified（与推送成败
-无关）；1→1 且标题变化且 push_title_change 推"改标题"；1→0/2 三连漏判推
+无关）；1→1 且标题变化且 push_title_change 推"改标题"；1→0/2 两连确认推
 "下播"（时长=now-last_live_time，offline_notified 首次尝试即置、失败也置，
-每离线期一次、计数不重置；从未观测到 status==1 的 sub 不计数不推）。开播/
+每离线期一次、计数不重置；从未观测到 status==1 的 sub 不计数不推；调度器
+在下播确认中按短间隔快速复查，延迟不再叠加完整轮询间隔）。开播/
 下播推送失败记 pending_push（``{"kind", "tries", "timestamp"}``，24h 过期，
 先于状态分支按 kind 匹配重投、当轮唯一推送，最多 3 次丢弃告警，相反转移
 清空/覆盖）。重启按 DB last_status==1 抑制首次成功轮询的常规推送（静默刷新
@@ -37,8 +38,10 @@ except ImportError:  # pragma: no cover - 离线裸模块导入（自检脚本�
     from push import format_event_time  # type: ignore[import-not-found]
     from repository import BiliError, BiliRepository  # type: ignore[import-not-found]
 
-#: 连续离线轮数阈值，达到才推送"下播"。
-_OFFLINE_STRIKES: int = 3
+#: 连续离线轮数阈值，达到才推送"下播"（调度器在下播确认中会以
+#: ``_FAST_RECHECK_SEC`` 短间隔快速复查，因此阈值取 2 即可：既保留一次
+#: 复查防 API 抖动误报，又不再叠加完整轮询间隔）。
+_OFFLINE_STRIKES: int = 2
 #: pending_push 重投上限（含首次失败），达上限后丢弃并告警。
 _MAX_RETRY_ROUNDS: int = 3
 #: pending_push 过期时间（秒）。

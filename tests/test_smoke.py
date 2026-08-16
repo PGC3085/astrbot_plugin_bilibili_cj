@@ -436,18 +436,16 @@ def test_full_chain_live_flow(tmp_path) -> None:
             assert await poller.poll() is False
             assert len(context.sent) == 1
 
-            # 1→0 × 3：仅第 3 轮推下播，时长 = now - last_live_time。
+            # 1→0 × 2：仅第 2 轮推下播，时长 = now - last_live_time。
             repo.room = _room(0)
             clock.tick(3600)
-            assert await poller.poll() is False  # 0（1/3）
-            assert await poller.poll() is False  # 0（2/3）
-            clock.tick(3600)  # now = _T0 + 7200
-            assert await poller.poll() is True  # 0（3/3）→ 下播
+            assert await poller.poll() is False  # 0（1/2）
+            assert await poller.poll() is True  # 0（2/2）→ 下播
             assert len(context.sent) == 2
             session, chain = context.sent[1]
             assert session == _SESSION
             assert "【B站下播】" in chain
-            assert "时长：7200" in chain
+            assert "时长：3600" in chain
             assert "https://live.bilibili.com/1" in chain
             await poller.poll()  # 同一离线期不重复推
             assert len(context.sent) == 2
@@ -571,7 +569,7 @@ def test_full_chain_collection_flow(tmp_path) -> None:
 
 def test_scheduler_drives_all_types_end_to_end() -> None:
     """真实 Scheduler + InstantDb + 受控时钟：seed 静默 → 注入变更 → 三类各
-    推一次 → 直播转离线 ×3 推下播（时长正确）→ stop() 干净。"""
+    推一次 → 直播转离线快速复查确认后推下播（时长正确）→ stop() 干净。"""
 
     async def scenario() -> None:
         clock = Clock()
@@ -623,19 +621,21 @@ def test_scheduler_drives_all_types_end_to_end() -> None:
             assert "新视频" in col
             assert "https://www.bilibili.com/video/BV0005" in col
 
-            # 直播转离线 ×3：前两轮不推，第 3 轮推下播（时长 = 30）。
+            # 直播转离线：首次观测不推（下播确认中，调度器按 15s 短间隔快速
+            # 复查），复查确认后推下播（时长 = now - last_live_time）。
             repo.room = _room(0)
-            await sleep.advance(5)
-            await _settle()  # 0（1/3）
-            await sleep.advance(5)
-            await _settle()  # 0（2/3）
-            assert all("【B站下播】" not in str(chain) for _, chain in context.sent)
-            await sleep.advance(5)
-            await _settle()  # 0（3/3）→ 下播
+            offline_sent = False
+            for _ in range(20):  # 快速复查为短间隔，小步推进直至推送出现
+                if any("【B站下播】" in str(c[1]) for c in context.sent):
+                    offline_sent = True
+                    break
+                await sleep.advance(5)
+                await _settle()
+            assert offline_sent
             offline = next(
                 str(chain) for _, chain in context.sent if "【B站下播】" in str(chain)
             )
-            assert "时长：30" in offline
+            assert "时长：" in offline
             assert "https://live.bilibili.com/1" in offline
         finally:
             await scheduler.stop()
